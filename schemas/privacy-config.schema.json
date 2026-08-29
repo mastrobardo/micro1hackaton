@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://privacy-agent/schemas/privacy-config.schema.json",
+  "title": "privacy.yaml",
+  "type": "object",
+  "required": ["version", "mapping_version", "levels", "strategies", "defaults_by_kind", "exclusions", "entities"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "type": "integer", "const": 1 },
+    "mapping_version": { "type": "integer", "minimum": 1 },
+    "levels": {
+      "type": "object",
+      "propertyNames": { "enum": ["public", "internal", "confidential", "restricted"] },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["transform", "approval"],
+        "additionalProperties": false,
+        "properties": {
+          "transform": { "type": "boolean" },
+          "approval": { "enum": ["none", "auto", "auto_if_unambiguous", "human"] },
+          "blocks_sync": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "strategies": {
+      "type": "array",
+      "items": { "enum": ["semantic_alias", "synthetic_id", "synthetic_endpoint", "generalize", "remove"] },
+      "uniqueItems": true
+    },
+    "defaults_by_kind": {
+      "type": "object",
+      "propertyNames": { "enum": ["vendor", "client", "internal_service", "infra_identifier", "domain", "secret", "person"] },
+      "additionalProperties": {
+        "type": "object",
+        "required": ["strategy", "level"],
+        "additionalProperties": false,
+        "properties": {
+          "strategy": { "enum": ["semantic_alias", "synthetic_id", "synthetic_endpoint", "generalize", "remove"] },
+          "level": { "enum": ["public", "internal", "confidential", "restricted"] }
+        }
+      }
+    },
+    "exclusions": { "type": "array", "items": { "type": "string" } },
+    "entities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "real", "kind", "level", "strategy", "ghost"],
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": { "properties": { "strategy": { "not": { "const": "remove" } } } },
+            "then": { "properties": { "ghost": { "minLength": 1 } } }
+          }
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "real": { "type": "string", "minLength": 1 },
+          "match": {
+            "type": "array",
+            "description": "additional real spellings / regexes for the same entity",
+            "items": {
+              "type": "object",
+              "required": ["kind", "value"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "enum": ["literal", "regex", "identifier"] },
+                "value": { "type": "string" }
+              }
+            }
+          },
+          "kind": { "enum": ["vendor", "client", "internal_service", "infra_identifier", "domain", "secret", "person"] },
+          "level": { "enum": ["public", "internal", "confidential", "restricted"] },
+          "strategy": { "enum": ["semantic_alias", "synthetic_id", "synthetic_endpoint", "generalize", "remove"] },
+          "ghost": { "type": "string", "description": "empty only when strategy=remove" },
+          "note": { "type": "string" },
+          "source": { "enum": ["seed", "discovered", "human"], "default": "seed" },
+          "approved_by": { "type": "string" }
+        }
+      }
+    }
+  }
+}

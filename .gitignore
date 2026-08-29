@@ -1,0 +1,28 @@
+# --- Python env / build artifacts ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Pipeline working area (not part of the solution) ---
+# real-repo copy, generated ghost repo, mapping store, audit log, eval output
+workspace/
+
+# --- Secrets (ground rule 08) ---
+# note: fixtures/**/*.env*.example ARE tracked — they hold only fictional values
+.env
+.env.local
+*.local
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/

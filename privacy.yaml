@@ -1,0 +1,163 @@
+# Privacy configuration — validated against schemas/privacy-config.schema.json
+#
+# `entities` below are the SEED set: the synthetic sensitive entities injected into the
+# fixture by fixtures/apply.sh. Entities found by `ghostc discover` are appended with
+# source: discovered and (for `restricted`) require approved_by before use.
+
+version: 1
+mapping_version: 1
+
+levels:
+  public: { transform: false, approval: none }
+  internal: { transform: true, approval: auto }
+  confidential: { transform: true, approval: auto_if_unambiguous }
+  restricted: { transform: true, approval: human, blocks_sync: true }
+
+strategies: [semantic_alias, synthetic_id, synthetic_endpoint, generalize, remove]
+
+defaults_by_kind:
+  vendor: { strategy: semantic_alias, level: internal }
+  client: { strategy: synthetic_id, level: restricted }
+  internal_service: { strategy: semantic_alias, level: confidential }
+  infra_identifier: { strategy: synthetic_id, level: confidential }
+  domain: { strategy: synthetic_endpoint, level: confidential }
+  secret: { strategy: remove, level: restricted }
+  person: { strategy: synthetic_id, level: restricted }
+
+exclusions:
+  - "**/node_modules/**"
+  - "**/.git/**"
+  - "**/yarn.lock"
+  - "**/package-lock.json"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/coverage/**"
+  - "**/*.png"
+  - "**/*.jpg"
+  - "**/*.ico"
+  - "**/*.lock"
+
+entities:
+  # --- client identity -------------------------------------------------------
+  - id: client_northwind
+    real: "Northwind Airlines"
+    match:
+      - { kind: literal, value: "Northwind" }
+      - { kind: identifier, value: "NWA" }
+    kind: client
+    level: restricted
+    strategy: synthetic_id
+    ghost: "ClientA"
+    note: "Fictional client. Direct identity — NDA-bound in the scenario."
+    source: seed
+
+  # --- commercial data vendor (OAG-analog) ---------------------------------
+  - id: vendor_skyroute
+    real: "SkyRoute Data Ltd"
+    match:
+      - { kind: literal, value: "SkyRoute" }
+      - { kind: regex, value: "SKYROUTE_[A-Z_]+" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "FlightDataProviderA"
+    note: "Fictional flight-schedule data supplier. Commercial agreement — contract-sensitive."
+    source: seed
+
+  - id: vendor_aerofeed
+    real: "AeroFeed Systems"
+    match:
+      - { kind: literal, value: "AeroFeed" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "FlightDataProviderB"
+    note: "Fictional second data supplier — target of the HARD eval case (provider swap)."
+    source: seed
+
+  # --- low-sensitivity vendors (the 'Datadog is not that sensitive' case) --
+  - id: vendor_datadog
+    real: "Datadog"
+    kind: vendor
+    level: internal
+    strategy: semantic_alias
+    ghost: "MetricsProviderA"
+    note: "Ubiquitous observability vendor; presence reveals nothing competitive."
+    source: seed
+
+  - id: vendor_sentry
+    real: "Sentry"
+    kind: vendor
+    level: internal
+    strategy: semantic_alias
+    ghost: "ErrorTrackingProviderA"
+    source: seed
+
+  # --- internal services ---------------------------------------------------
+  - id: svc_booking_core
+    real: "booking-core"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "internal-service-a"
+    source: seed
+
+  - id: svc_pricing
+    real: "pricing-svc"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "internal-service-b"
+    source: seed
+
+  - id: svc_fare_cache
+    real: "fare-cache"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "internal-service-c"
+    source: seed
+
+  # --- infrastructure identifiers ----------------------------------------
+  - id: infra_internal_host
+    real: "api.northwind-internal.net"
+    kind: domain
+    level: confidential
+    strategy: synthetic_endpoint
+    ghost: "internal-endpoint-a.example"
+    source: seed
+
+  - id: infra_private_ip
+    real: "10.20.4.7"
+    kind: infra_identifier
+    level: confidential
+    strategy: synthetic_id
+    ghost: "PRIVATE_IP_001"
+    source: seed
+
+  - id: infra_region
+    real: "nwa-prod-eu-west-1"
+    kind: infra_identifier
+    level: confidential
+    strategy: generalize
+    ghost: "production-region-a"
+    source: seed
+
+  - id: infra_aws_account
+    real: "447015923388"
+    kind: infra_identifier
+    level: restricted
+    strategy: synthetic_id
+    ghost: "AWS_ACCOUNT_001"
+    note: "Account id is client-bound in the scenario."
+    source: seed
+
+  # --- secret ----------------------------------------------------------
+  - id: secret_skyroute_key
+    real: "sk_live_northwind_9f3ab7c21e5d4088"
+    kind: secret
+    level: restricted
+    strategy: remove
+    ghost: ""
+    note: "Fictional API key. Value removed; env var name retained."
+    source: seed

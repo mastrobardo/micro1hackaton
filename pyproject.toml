@@ -1,0 +1,26 @@
+[project]
+name = "ghostc"
+version = "0.1.0"
+description = "Privacy compiler + agent workflow: real repo <-> privacy-safe ghost repo"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "PyYAML>=6.0",
+    "jsonschema>=4.0",
+    # added when the compiler lands:
+    # "tree-sitter>=0.21",
+    # "tree-sitter-languages>=1.10",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+ghostc = "ghostc.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["ghostc", "ghostc.agents", "ghostc.parsers"]

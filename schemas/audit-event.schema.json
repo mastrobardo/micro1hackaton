@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://privacy-agent/schemas/audit-event.schema.json",
+  "title": "audit event",
+  "description": "One line of workspace/audit.jsonl. Must never contain a real sensitive value — use real_sha256.",
+  "type": "object",
+  "required": ["operation_id", "ts", "event", "component", "actor"],
+  "additionalProperties": false,
+  "properties": {
+    "operation_id": { "type": "string", "description": "one id per pipeline run" },
+    "ts": { "type": "string", "format": "date-time" },
+    "event": {
+      "enum": [
+        "run.start", "run.end",
+        "discover.entity_proposed", "discover.entity_approved", "discover.entity_rejected",
+        "compile.file_scanned", "compile.entity_detected", "compile.transformed", "compile.mapping_created", "compile.mapping_reused",
+        "verify.scan", "verify.pass", "verify.block",
+        "patch.parsed", "patch.entity_resolved", "patch.applied", "patch.rejected",
+        "consistency.verdict",
+        "approval.requested", "approval.granted", "approval.denied",
+        "policy.violation"
+      ]
+    },
+    "component": { "enum": ["orchestrator", "discovery", "compiler", "verifier", "reverse_compiler", "consistency", "eval"] },
+    "actor": { "type": "string", "description": "system | human:<id>" },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "entity_id": { "type": "string" },
+        "real_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" },
+        "mapping_version": { "type": "integer" }
+      }
+    },
+    "level": { "enum": ["public", "internal", "confidential", "restricted"] },
+    "decision": { "type": "string" },
+    "details": { "type": "object", "description": "free-form, no sensitive values" }
+  }
+}

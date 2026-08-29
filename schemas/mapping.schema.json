@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://privacy-agent/schemas/mapping.schema.json",
+  "title": "mapping store",
+  "description": "Boundary-internal. Holds real->ghost in cleartext (needed for reverse compilation). Never crosses the privacy boundary.",
+  "type": "object",
+  "required": ["mapping_version", "created", "updated", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "mapping_version": { "type": "integer", "minimum": 1 },
+    "created": { "type": "string", "format": "date-time" },
+    "updated": { "type": "string", "format": "date-time" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["entity_id", "real", "ghost", "kind", "level", "strategy", "frozen"],
+        "additionalProperties": false,
+        "properties": {
+          "entity_id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+          "real": { "type": "string", "minLength": 1 },
+          "real_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "ghost": { "type": "string", "description": "empty only when strategy=remove" },
+          "kind": { "enum": ["vendor", "client", "internal_service", "infra_identifier", "domain", "secret", "person"] },
+          "level": { "enum": ["public", "internal", "confidential", "restricted"] },
+          "strategy": { "enum": ["semantic_alias", "synthetic_id", "synthetic_endpoint", "generalize", "remove"] },
+          "frozen": { "type": "boolean", "description": "once true, `ghost` must never change" },
+          "first_seen_run": { "type": "string" },
+          "occurrences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["file", "line"],
+              "additionalProperties": false,
+              "properties": {
+                "file": { "type": "string" },
+                "line": { "type": "integer", "minimum": 1 },
+                "node_kind": { "type": "string" }
+              }
+            }
+          },
+          "approved_by": { "type": "string" }
+        }
+      }
+    }
+  }
+}
