@@ -41,6 +41,25 @@
       }
     },
     "exclusions": { "type": "array", "items": { "type": "string" } },
+    "detection": {
+      "type": "object",
+      "description": "Candidate-scoring thresholds for `ghostc discover` and the threshold-driven compiler. Every field has a built-in default.",
+      "additionalProperties": false,
+      "properties": {
+        "auto_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "review_threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "auto_alias": { "type": "boolean", "description": "mint an alias for an unconfigured candidate that scores auto and let compile transform it" },
+        "decode_pass": { "type": "boolean" },
+        "fuzzy_min_len": { "type": "integer", "minimum": 1 },
+        "fuzzy_min_ratio": { "type": "number", "minimum": 0, "maximum": 100 },
+        "graph_decay": { "type": "number", "minimum": 0, "maximum": 1 },
+        "graph_floor_hops": { "type": "integer", "minimum": 1 },
+        "signal_weights": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
     "entities": {
       "type": "array",
       "items": {
@@ -74,6 +93,7 @@
           "strategy": { "enum": ["semantic_alias", "synthetic_id", "synthetic_endpoint", "generalize", "remove"] },
           "ghost": { "type": "string", "description": "empty only when strategy=remove" },
           "note": { "type": "string" },
+          "rewrite_imports": { "type": "boolean", "default": false, "description": "also rewrite this entity inside import/require package specifiers (breaks resolution in the ghost env, so off by default)" },
           "source": { "enum": ["seed", "discovered", "human"], "default": "seed" },
           "approved_by": { "type": "string" }
         }

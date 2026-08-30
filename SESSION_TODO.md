@@ -1,35 +1,76 @@
-# Session TODO — 2026-08-30
+# Session TODO — handoff (updated 2026-08-30)
 
-Session-scoped checklist. Long-term plan lives in `TODO.md`; running status in `PROGRESS.md`.
+Start-here checklist for the next session. Long-term plan: `TODO.md`. Running status +
+decision log: `PROGRESS.md` (read it first). Memory index: `memory/MEMORY.md`.
 
-## Done this session: `ghostc compile`
+## State — the full slice is shipped
 
-- [x] Flat alias scheme in `privacy.yaml` (`vendor-a`, `service-a`, `region-a`, `ip-a`, `client-a`, …)
-- [x] Added `person_service_owner` seed entity (`Priya Nair`) + injected owner line into `internalServices.js`
-- [x] `privacy.yaml` `match[]` stems: `northwind`, `skyroute`/`skyRoute`, `aerofeed`, `datadoghq` literal; dropped the `SKYROUTE_[A-Z_]+` regex
-- [x] `ghostc/aliasing.py` — segment casing engine (`analyze` / `render` / `splice_span` / `render_like`)
-- [x] `ghostc/matching.py` — entity matchers, longest-span + remove/level priority, multi-entity compound tokens
-- [x] `ghostc/parsers/treesitter.py` (JS/TS/TSX/HCL) + `ghostc/parsers/scoped.py` (`.env*`/`.json`/`.yml`/`.md`/…)
-- [x] `ghostc/compile.py` — walk + exclusions, ghost tree, path rename, `git` baseline, mapping store, `ghost-spec.md`, audit events
-- [x] Wired `compile` into `cli.py` (+ approval-gate pre-flight); deps → `tree-sitter-language-pack`
-- [x] `cli.md` — manual test walkthrough, every command verified
-- Result: 84 files scanned, 7 changed, 3 renamed, 13 entities, **0 leaks**, deterministic, ghost JS parses
+- `pytest` → **205 passed, 1 skipped** (fixture built) / green from a clean checkout.
+- **The anonymizer is `ghostc compile`** — deterministic tree-sitter, node-scoped edits
+  (identifier / string / comment only), one canonical alias per entity re-cased per occurrence
+  by a segment engine, compound-token splice, sensitive path renames, frozen `real ↔ ghost`
+  mapping store. **Not `sed`.** Now also **threshold-driven**: it runs the `discover` scan and,
+  with `detection.auto_alias: true`, neutralises unconfigured `auto` candidates too.
+- `ghostc baseline` is the **`sed` comparator only** — dumb keyword redaction, not the product.
+- **All seven commands implemented** — `validate-config`, `discover`, `compile`, `verify`,
+  `baseline`, `apply-patch`, `eval`. No stubs.
+- **Measured (`ghostc eval`, fixture):** baseline **28** residual vs `compile` **0**.
+  **`ghostc discover`:** 13/13 configured entities re-found from code alone; unconfigured
+  *Meridian* (0.99) + *Contoso* (0.83) proposed; 0 OSS-library false positives. Reports:
+  `workspace/eval-report.{md,csv}`, `workspace/private/candidates.jsonl`. Evidence: `CHANGELOG.md`.
+- Pipeline round-trips: `compile` → `verify` → (agent) → `apply-patch` → real branch.
+- Boundary layout is live: `workspace/ghost/` + sibling `workspace/ghost-spec.md` cross;
+  `workspace/private/{mapping.json,audit.jsonl,candidates.jsonl}` never cross.
+- One leak-scan implementation: `ghostc/scanning.anchored_scan` (reuse it everywhere).
+- Detection layer: `ghostc/detect/` (candidate · settings · tokenize · shapes · decode · graph
+  · semantic · signals · scan) + `ghostc/discover.py`. Config: the optional `detection:` block.
+- Working tree is **uncommitted** (user commits each iteration as a CHANGELOG entry). New
+  untracked: `ghostc/detect/`, `ghostc/discover.py`, `tests/test_scoring.py`,
+  `tests/test_discover.py`, `tests/expected/discover-groundtruth.json`,
+  `fixtures/inject/src/integrations/adversary.js`.
 
-## Next session (in order)
+---
 
-- [ ] **`tests/` suite** (nothing on disk yet):
-  - `test_aliasing.py` — `analyze`/`render` round-trip, `splice_span` sub-spans, bare-run `-` fallback
-  - `test_matching.py` — remove/level tie priority, multi-entity compound token, name-shaped literal casing
-  - `test_compile.py` — 0 real values in ghost, determinism/idempotence, `.git` not copied, rename, spec has no real values, 3+ levels in spec, frozen-alias reuse on 2nd run
-  - backfill scaffold suite from the `testing-approach` memory: `test_schemas` / `test_config` / `test_mapping` / `test_audit` / `test_fixture_groundtruth` (+ `tests/expected/groundtruth.json`) / `test_cli` / `test_determinism`; `test_fixture_builds` skips if `node`/`terraform` absent
-- [ ] `ghostc verify` — `\b`-anchored leak scan + `yarn lint` gate, fail closed
-- [ ] Baseline `sed` keyword-redaction path
-- [ ] `ghostc eval` — 10 cases, baseline vs solution, metric table
-- [ ] `ghostc apply-patch` — ghost diff → real diff + ambiguity rejection
-- [ ] Start filling `CHANGELOG.md` with evidence-linked rows
+## Done this session — Iteration 6: detection overhaul (`ghostc discover`)
 
-## Open questions for you
+Candidate scoring model (noisy-OR signals) → reference-graph taint → bounded fuzzy + shapes →
+decode pass → anchor-driven proposals. `compile` is threshold-driven (`detection.auto_alias`
+on/off). See `PROGRESS.md` → "discover — what it does" + the 2026-08-30 decision-log rows +
+"Known limits (discover, v1)". Details also in `memory/detection-scoring.md`.
 
-1. Ghost prose casing inconsistency (`client-a` / `Client A` / `ClientA`) — leave as-is (reversible, cosmetic) or add a normalisation pass?
-2. File renaming in `compile` (sensitive path components + git baseline commit in `workspace/ghost/`) — keep?
-3. The 10 eval tasks (`PROGRESS.md` → "Eval cases") — still deferred; review before `eval` is built.
+Deferred from the plan (not needed for the fixture, carries golden-drift risk): making
+`compile` auto-transform *fuzzy/graph-found spellings of already-configured entities* that the
+matchers miss. Today `auto` candidates for configured entities are all exact/stem, which the
+matchers already handle.
+
+---
+
+## NEXT SESSION: external-agent eval harness
+
+- The 10 + 1 eval tasks (`PROGRESS.md` → "Eval cases") + the agent-run metrics (task pass rate,
+  human approvals, wall-clock, token cost). `ghostc eval` currently fills the primary-metric
+  (leak count) row only. Review the task list (open question 3) before building.
+- Optional follow-ups: (a) tune `detection.auto_threshold` / add `match[]` seeds so `compile`
+  auto-neutralises Contoso; (b) scope-aware graph node ids; (c) the deferred
+  configured-entity fuzzy/graph widening above.
+
+## Completed — MVP + detection iterations (2026-08-30)
+
+`compile` · `verify` · `baseline` (`sed` comparator) · `eval` (28 vs 0) · `apply-patch`
+(ghost PR diff → real PR diff, fail-closed) · `discover` (candidate scoring, 13/13 recall,
+Meridian+Contoso proposed, 0 OSS FPs) · threshold-driven `compile` · `CHANGELOG.md`. Details
+in `PROGRESS.md` ("what it does" sections + decision log) and
+`memory/{compiler-and-alias-model,verify-and-leak-scan,baseline-and-eval,
+reverse-patch-compiler,detection-scoring}.md`.
+
+## Open questions for the user
+
+1. Ghost prose casing inconsistency (`client-a` / `Client A` / `ClientA`) — leave as-is
+   (reversible, cosmetic) or add a normalisation pass? Tests currently pin current behaviour.
+   (`apply-patch` inherits this as its `lossy` flag.)
+2. File renaming in `compile` (sensitive path components + git baseline in `workspace/ghost/`)
+   — keep? `test_compile.py` encodes "keep" as the spec.
+3. The 10 eval tasks (`PROGRESS.md` → "Eval cases") — review before the external-agent harness.
+4. `discover` default thresholds (`detection.auto_threshold` 0.90 / `review_threshold` 0.45)
+   and whether `auto_alias` should ship on. Contoso (0.83) currently needs a human; Meridian
+   (0.99) auto-compiles when `auto_alias: true`.

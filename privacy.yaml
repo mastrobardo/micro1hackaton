@@ -28,6 +28,15 @@ defaults_by_kind:
   secret: { strategy: remove, level: restricted }
   person: { strategy: synthetic_id, level: restricted }
 
+# Candidate-scoring thresholds (see ghostc/detect/). All optional — these are the
+# built-in defaults, shown for discoverability. `auto_alias: false` lets `compile`
+# neutralise entities that `discover` proposes but that are not listed below.
+detection:
+  auto_threshold: 0.90
+  review_threshold: 0.45
+  auto_alias: false
+  decode_pass: true
+
 exclusions:
   - "**/node_modules/**"
   - "**/.git/**"

@@ -1,0 +1,196 @@
+# privacy.yaml + detection.auto_alias ON — copy of privacy.yaml, identical except
+# the `detection:` block below. Use it to make `ghostc compile` also neutralise the
+# entities `ghostc discover` proposes but that are NOT in the seed list (the
+# Meridian / Contoso layer in fixtures/inject/src/integrations/adversary.js):
+#
+#   ghostc compile --repo workspace/real --config privacy.autoalias.yaml
+#
+# auto_threshold is lowered to 0.80 so Contoso (0.83) is caught too, not just
+# Meridian (0.99). A discovered *restricted* proposal still BLOCKS pending approval.
+# Keep the `entities:` list in sync with privacy.yaml if you edit the seeds.
+#
+# NOTE: `require('@meridianaero/flight-sdk')` and the like are KEPT verbatim (a
+# renamed package won't resolve in the ghost) — they show up under "import
+# specifiers kept" and in ghost-spec.md. Everything else about Meridian/Contoso
+# (env vars, identifiers, prose, base64) is aliased.
+
+version: 1
+mapping_version: 1
+
+levels:
+  public: { transform: false, approval: none }
+  internal: { transform: true, approval: auto }
+  confidential: { transform: true, approval: auto_if_unambiguous }
+  restricted: { transform: true, approval: human, blocks_sync: true }
+
+strategies: [semantic_alias, synthetic_id, synthetic_endpoint, generalize, remove]
+
+defaults_by_kind:
+  vendor: { strategy: semantic_alias, level: internal }
+  client: { strategy: synthetic_id, level: restricted }
+  internal_service: { strategy: semantic_alias, level: confidential }
+  infra_identifier: { strategy: synthetic_id, level: confidential }
+  domain: { strategy: synthetic_endpoint, level: confidential }
+  secret: { strategy: remove, level: restricted }
+  person: { strategy: synthetic_id, level: restricted }
+
+detection:
+  auto_threshold: 0.80
+  review_threshold: 0.45
+  auto_alias: true
+  decode_pass: true
+
+exclusions:
+  - "**/node_modules/**"
+  - "**/.git/**"
+  - "**/yarn.lock"
+  - "**/package-lock.json"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/coverage/**"
+  - "**/*.png"
+  - "**/*.jpg"
+  - "**/*.ico"
+  - "**/*.lock"
+
+entities:
+  # --- client identity -------------------------------------------------------
+  - id: client_northwind
+    real: "Northwind Airlines"
+    match:
+      - { kind: literal, value: "Northwind" }
+      - { kind: identifier, value: "northwind" }
+      - { kind: identifier, value: "NWA" }
+    kind: client
+    level: restricted
+    strategy: synthetic_id
+    ghost: "client-a"
+    note: "Fictional client. Direct identity — NDA-bound in the scenario."
+    source: seed
+
+  # --- commercial data vendor (OAG-analog) ---------------------------------
+  - id: vendor_skyroute
+    real: "SkyRoute Data Ltd"
+    match:
+      - { kind: literal, value: "SkyRoute" }
+      - { kind: identifier, value: "skyroute" }
+      - { kind: identifier, value: "skyRoute" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "vendor-a"
+    note: "Fictional flight-schedule data supplier. Commercial agreement — contract-sensitive."
+    source: seed
+
+  - id: vendor_aerofeed
+    real: "AeroFeed Systems"
+    match:
+      - { kind: literal, value: "AeroFeed" }
+      - { kind: identifier, value: "aerofeed" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "vendor-b"
+    note: "Fictional second data supplier — target of the HARD eval case (provider swap)."
+    source: seed
+
+  # --- low-sensitivity vendors (the 'Datadog is not that sensitive' case) --
+  - id: vendor_datadog
+    real: "Datadog"
+    match:
+      - { kind: literal, value: "datadoghq" }
+    kind: vendor
+    level: internal
+    strategy: semantic_alias
+    ghost: "vendor-c"
+    note: "Ubiquitous observability vendor; presence reveals nothing competitive."
+    source: seed
+
+  - id: vendor_sentry
+    real: "Sentry"
+    kind: vendor
+    level: internal
+    strategy: semantic_alias
+    ghost: "vendor-d"
+    source: seed
+
+  # --- internal services ---------------------------------------------------
+  - id: svc_booking_core
+    real: "booking-core"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "service-a"
+    source: seed
+
+  - id: svc_pricing
+    real: "pricing-svc"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "service-b"
+    source: seed
+
+  - id: svc_fare_cache
+    real: "fare-cache"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "service-c"
+    source: seed
+
+  # --- infrastructure identifiers ----------------------------------------
+  - id: infra_internal_host
+    real: "api.northwind-internal.net"
+    kind: domain
+    level: confidential
+    strategy: synthetic_endpoint
+    ghost: "host-a.example"
+    source: seed
+
+  - id: infra_private_ip
+    real: "10.20.4.7"
+    kind: infra_identifier
+    level: confidential
+    strategy: synthetic_id
+    ghost: "ip-a"
+    source: seed
+
+  - id: infra_region
+    real: "nwa-prod-eu-west-1"
+    kind: infra_identifier
+    level: confidential
+    strategy: generalize
+    ghost: "region-a"
+    source: seed
+
+  - id: infra_aws_account
+    real: "447015923388"
+    kind: infra_identifier
+    level: restricted
+    strategy: synthetic_id
+    ghost: "account-a"
+    note: "Account id is client-bound in the scenario."
+    source: seed
+
+  # --- person (PII) --------------------------------------------------------
+  - id: person_service_owner
+    real: "Priya Nair"
+    match:
+      - { kind: literal, value: "priya.nair@northwind-internal.net" }
+    kind: person
+    level: restricted
+    strategy: synthetic_id
+    ghost: "person-a"
+    note: "Fictional internal engineer named as a service owner. PII — direct identity."
+    source: seed
+
+  # --- secret ----------------------------------------------------------
+  - id: secret_skyroute_key
+    real: "sk_live_northwind_9f3ab7c21e5d4088"
+    kind: secret
+    level: restricted
+    strategy: remove
+    ghost: ""
+    note: "Fictional API key. Value removed; env var name retained."
+    source: seed

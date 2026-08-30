@@ -1,21 +1,14 @@
 """ghostc command-line interface.
 
-Implemented today:  validate-config
-Stubs (see PROGRESS.md):  discover, compile, verify, apply-patch, eval
+Implemented:  validate-config, discover, compile, compile-spec, verify, baseline,
+              apply-patch, eval
 """
 from __future__ import annotations
-
-import sys
 
 import click
 
 from ghostc import __version__
 from ghostc.config import ConfigError, entities_needing_approval, load_config
-
-_STUB = (
-    "not yet implemented — this is the scaffold. "
-    "See PROGRESS.md for the build order and SESSION_TODO.md for what's next."
-)
 
 
 @click.group()
@@ -53,24 +46,59 @@ def validate_config(config_path: str) -> None:
 
 @main.command()
 @click.option("--repo", required=True, type=click.Path())
-@click.option("--config", "config_path", default="privacy.yaml", type=click.Path())
-def discover(repo: str, config_path: str) -> None:
-    """Scan REPO, propose sensitive entities, reuse existing mapping identities."""
-    raise SystemExit(f"ghostc discover: {_STUB}")
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--out", "out_path", default="workspace/private/candidates.jsonl",
+              show_default=True, type=click.Path(),
+              help="Ranked candidates, one JSON object per line. Boundary-internal.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--threshold", type=float, default=None,
+              help="Override detection.review_threshold for this run.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the candidate list as JSON.")
+def discover(repo: str, config_path: str, out_path: str, audit_path: str,
+             threshold: float | None, as_json: bool) -> None:
+    """Scan REPO, score sensitive-entity candidates, propose the unconfigured ones."""
+    from ghostc.discover import discover_repo
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = discover_repo(repo, config_path=config_path, out=out_path,
+                           audit_path=audit_path, threshold=threshold)
+    if as_json:
+        import json
+
+        click.echo(json.dumps([c.to_dict() for c in result.scan.candidates], indent=2))
+    else:
+        click.echo(result.summary())
 
 
 @main.command()
 @click.option("--repo", required=True, type=click.Path())
 @click.option("--config", "config_path", default="privacy.yaml", show_default=True,
               type=click.Path())
-@click.option("--out", default="workspace/ghost", show_default=True, type=click.Path())
-@click.option("--mapping", "mapping_path", default="workspace/mapping.json",
-              show_default=True, type=click.Path())
-@click.option("--audit", "audit_path", default="workspace/audit.jsonl",
-              show_default=True, type=click.Path())
+@click.option("--out", default="workspace/ghost", show_default=True, type=click.Path(),
+              help="Ghost repo — the only output that crosses the privacy boundary.")
+@click.option("--spec", "spec_path", default="workspace/ghost-spec.md",
+              show_default=True, type=click.Path(),
+              help="Ghost spec — crosses alongside the ghost; kept a sibling, never inside it.")
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path(),
+              help="Mapping store — boundary-internal, holds real values. Never crosses.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path(), help="Audit log — boundary-internal.")
+@click.option("--candidates", "candidates_path",
+              default="workspace/private/candidates.jsonl", show_default=True,
+              type=click.Path(),
+              help="Detection candidates + review queue — boundary-internal.")
+@click.option("--no-detect", is_flag=True,
+              help="Skip the candidate-scoring pass (matchers only, no review queue).")
 @click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
-def compile(repo: str, config_path: str, out: str, mapping_path: str,
-            audit_path: str, dry_run: bool) -> None:
+def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path: str,
+            audit_path: str, candidates_path: str, no_detect: bool, dry_run: bool) -> None:
     """Compile REPO into a privacy-safe ghost repo + ghost spec."""
     from ghostc.compile import compile_repo
 
@@ -87,35 +115,193 @@ def compile(repo: str, config_path: str, out: str, mapping_path: str,
             "Add `approved_by:` in the config before compiling."
         )
 
-    result = compile_repo(repo, config_path=config_path, out=out,
+    result = compile_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
                           mapping_path=mapping_path, audit_path=audit_path,
+                          candidates_path=candidates_path, detect=not no_detect,
                           dry_run=dry_run)
     click.echo(result.summary())
 
 
+@main.command("compile-spec")
+@click.option("--task", "task_path", required=True, type=click.Path(),
+              help="Real implementation task text: a file path, or '-' for stdin.")
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path(),
+              help="Substitution source — boundary-internal, never crosses.")
+@click.option("--out", "out_path", default="workspace/ghost-task.md", show_default=True,
+              type=click.Path(),
+              help="Sanitized TASK.md — this is what crosses to the consultancy side.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit the ghost task as JSON.")
+def compile_spec(task_path: str, config_path: str, mapping_path: str, out_path: str,
+                 audit_path: str, as_json: bool) -> None:
+    """Compile a real implementation task into a sanitized ghost TASK.md. Fail closed."""
+    from pathlib import Path
+
+    from ghostc.agents.spec import Rejection
+    from ghostc.agents.spec import compile_spec as _compile_spec
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    text = (click.get_text_stream("stdin").read() if task_path == "-"
+            else Path(task_path).read_text(encoding="utf-8"))
+
+    try:
+        spec = _compile_spec(text, config_path=config_path, mapping_path=mapping_path,
+                             audit_path=audit_path, out_path=out_path)
+    except Rejection as rej:
+        raise SystemExit(f"REJECTED (fail closed)\n  {rej}")
+
+    if as_json:
+        import json
+
+        click.echo(json.dumps(
+            {"operation_id": spec.operation_id, "ghost_task": spec.ghost_task,
+             "substitutions": [s.to_dict() for s in spec.substitutions]}, indent=2))
+    else:
+        click.echo(spec.summary())
+        click.echo(f"  -> {out_path}")
+
+
 @main.command()
 @click.option("--ghost", required=True, type=click.Path())
-@click.option("--mapping", default="workspace/mapping.json", type=click.Path())
-def verify(ghost: str, mapping: str) -> None:
-    """Leak scan + build gate over the ghost repo. Fail closed."""
-    raise SystemExit(f"ghostc verify: {_STUB}")
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--operation-id", default=None, help="Correlate with a prior compile run.")
+@click.option("--require-build", is_flag=True,
+              help="Treat an unrunnable yarn lint as a block (fail closed on the build gate too).")
+def verify(ghost: str, mapping_path: str, config_path: str, audit_path: str,
+           operation_id: str | None, require_build: bool) -> None:
+    """Leak scan + mapping-leak scan + build gate over the ghost repo. Fail closed."""
+    from ghostc.audit import AuditLog
+    from ghostc.verify import verify_ghost
+
+    result = verify_ghost(ghost, mapping_path, config_path=config_path,
+                          require_build=require_build)
+
+    audit = AuditLog(audit_path, operation_id)
+    audit.emit("verify.scan", "verifier", subject={"file": str(result.ghost)},
+               details={c.name: c.status for c in result.checks})
+    if result.ok:
+        audit.emit("verify.pass", "verifier", subject={"file": str(result.ghost)})
+    else:
+        audit.emit("verify.block", "verifier", subject={"file": str(result.ghost)},
+                   decision="block", details={"reasons": [c.name for c in result.checks
+                                                          if c.status == "fail"]})
+
+    click.echo(result.summary())
+    if not result.ok:
+        raise SystemExit(1)
+
+
+@main.command()
+@click.option("--repo", required=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--out", default="workspace/baseline-ghost", show_default=True,
+              type=click.Path(), help="Baseline repo — the keyword-redaction comparator.")
+@click.option("--spec", "spec_path", default="workspace/baseline-spec.md",
+              show_default=True, type=click.Path())
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
+def baseline(repo: str, config_path: str, out: str, spec_path: str, audit_path: str,
+             dry_run: bool) -> None:
+    """Dumb keyword redaction — the fair baseline `eval` compares `compile` against."""
+    from ghostc.baseline import baseline_repo
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = baseline_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
+                           audit_path=audit_path, dry_run=dry_run)
+    click.echo(result.summary())
 
 
 @main.command("apply-patch")
-@click.option("--ghost-diff", required=True, type=click.Path())
-@click.option("--mapping", default="workspace/mapping.json", type=click.Path())
-@click.option("--real", required=True, type=click.Path())
-def apply_patch(ghost_diff: str, mapping: str, real: str) -> None:
-    """Translate a ghost PR diff into a real PR diff. Reject ambiguous mappings."""
-    raise SystemExit(f"ghostc apply-patch: {_STUB}")
+@click.option("--ghost-diff", required=True, type=click.Path(exists=True))
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--real", "real_repo", default=None, type=click.Path(),
+              help="Real repo to apply the translated diff into (with --apply).")
+@click.option("--out", "out_path", default=None, type=click.Path(),
+              help="Write the real diff here (default: stdout).")
+@click.option("--mapping-version", type=int, default=None,
+              help="Reject if the store's mapping_version differs.")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="git apply --3way the translated diff onto a new branch in --real.")
+@click.option("--branch", default="ghostc/reverse-patch", show_default=True)
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+def apply_patch(ghost_diff: str, mapping_path: str, config_path: str,
+                real_repo: str | None, out_path: str | None, mapping_version: int | None,
+                do_apply: bool, branch: str, audit_path: str) -> None:
+    """Translate a ghost PR diff into a real PR diff. Fail closed on ambiguity."""
+    from ghostc.patch import Rejection, reverse_patch
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    try:
+        result = reverse_patch(ghost_diff, mapping_path, config_path=config_path,
+                               real_repo=real_repo, mapping_version=mapping_version,
+                               do_apply=do_apply, branch=branch, audit_path=audit_path)
+    except Rejection as rej:
+        raise SystemExit(f"REJECTED (fail closed)\n  {rej}")
+
+    if out_path:
+        from pathlib import Path
+
+        Path(out_path).write_text(result.real_diff, encoding="utf-8")
+        click.echo(result.summary())
+    elif do_apply:
+        click.echo(result.summary())
+    else:
+        click.echo(result.real_diff, nl=False)
+        click.echo(result.summary(), err=True)
 
 
 @main.command("eval")
-@click.option("--cases", default="eval/cases", type=click.Path())
-@click.option("--config", "config_path", default="privacy.yaml", type=click.Path())
-def eval_(cases: str, config_path: str) -> None:
-    """Run baseline vs solution over the eval cases; emit the metric table."""
-    raise SystemExit(f"ghostc eval: {_STUB}")
+@click.option("--real", default="workspace/real", show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--baseline-out", default="workspace/baseline-ghost", show_default=True,
+              type=click.Path())
+@click.option("--compile-out", default="workspace/ghost", show_default=True,
+              type=click.Path())
+@click.option("--report", default="workspace/eval-report", show_default=True,
+              type=click.Path(), help="Writes <report>.md and <report>.csv.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+def eval_(real: str, config_path: str, baseline_out: str, compile_out: str,
+          report: str, audit_path: str) -> None:
+    """Baseline keyword redaction vs `compile`: residual-leak metric (MVP, no agent)."""
+    from ghostc.eval import run_eval
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = run_eval(real, config_path=config_path, baseline_out=baseline_out,
+                      compile_out=compile_out, report=report, audit_path=audit_path)
+    click.echo(result.summary())
 
 
 if __name__ == "__main__":

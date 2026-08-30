@@ -8,11 +8,12 @@ Running status board. Skim this first.
 
 | | |
 |---|---|
-| **Phase** | `compile` implemented + CLI-wired (0 leaks on fixture). Next = `tests/`, then `verify` + baseline |
+| **Phase** | Full slice shipped: `compile` + `verify` + `baseline` + `eval` + `apply-patch` + `discover` (candidate scoring) + `CHANGELOG.md` + `tests/` (205 pass / 1 skip). No stubs left. |
 | **Last updated** | 2026-08-30 |
 | **Base fixture** | `hagopj13/node-express-boilerplate` (MIT) cloned at `../node-express-boilerplate` |
 | **Blocked on** | Nothing. (Optional review: ghost prose-casing inconsistency — cosmetic, see Known limits) |
-| **Next action** | Write `tests/` suite (`test_aliasing` / `test_matching` / `test_compile` + backfill scaffold suite) |
+| **Next action** | External-agent eval harness (the 10+1 tasks + task-pass/approval/latency/cost rows). See `SESSION_TODO.md`. |
+| **Measured win** | `ghostc eval` on the fixture: baseline keyword redaction leaves **28** residual real-entity occurrences (casing-aware detector); `compile` leaves **0**. `ghostc discover` re-finds **13/13** configured entities from code alone and proposes the two unconfigured entities in `adversary.js` (**Meridian 0.99**, **Contoso 0.83**) with **0** OSS-library false positives. Round-trips through `apply-patch` onto a real branch. `CHANGELOG.md` records it. |
 
 ## How to run today
 
@@ -22,11 +23,90 @@ Full walkthrough with expected output: **`cli.md`**.
 python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 ghostc validate-config --config privacy.yaml   # WORKS: 14 entities  confidential=8 internal=2 restricted=4
 ./fixtures/apply.sh                             # WORKS: builds workspace/real/
-ghostc compile --repo workspace/real --dry-run # WORKS: 84 scanned, 7 changed, 3 renamed, 13 entities
-ghostc compile --repo workspace/real           # WORKS: writes workspace/ghost/ + ghost-spec.md + mapping.json + audit.jsonl
+ghostc compile --repo workspace/real --dry-run # WORKS: 85 scanned, 8 changed, 3 renamed, 13 entities
+ghostc compile --repo workspace/real           # WORKS: workspace/ghost/ + ghost-spec.md (cross) ; workspace/private/{mapping.json,audit.jsonl} (never cross)
+ghostc verify  --ghost workspace/ghost --mapping workspace/private/mapping.json   # WORKS: PASS/BLOCK, exit 0/1, fail closed
+ghostc baseline --repo workspace/real                                            # WORKS: workspace/baseline-ghost/ + baseline-spec.md (keyword redaction, not privacy-safe)
+ghostc eval    --real workspace/real                                            # WORKS: workspace/eval-report.{md,csv}; baseline residual 28 vs compile 0
+ghostc apply-patch --ghost-diff <d> --mapping workspace/private/mapping.json     # WORKS: ghost PR diff -> real PR diff on stdout; --apply lands it on a branch; fail-closed rejects
+pytest -q                                       # WORKS: 205 passed, 1 skipped (fixture built); parity from a clean checkout (more skips, 0 fails)
 ```
 
-`discover` / `verify` / `apply-patch` / `eval` are stubs — they print a pointer and exit non-zero.
+Fixture-dependent tests skip cleanly when `workspace/real/` is absent, so `pytest -q` is
+green from a fresh checkout. `python -m tests.gen_groundtruth` regenerates
+`tests/expected/groundtruth.json` (the leak-metric baseline) if the injected layer changes.
+
+All seven commands are implemented — no stubs left.
+
+### discover — what it does
+Candidate-scoring detection over the real repo. Two channels per file: a **phrase** scan
+(`anchored_scan` over full name/alias spellings) and a **token** scan
+(`ghostc/detect/tokenize.py` — splits `- _ . : / @` + camelCase). Each surface accrues
+independent **signals** — `exact` / `stem` / `import_ref` / `fuzzy` (`rapidfuzz`) / `acronym`
+/ `shape` (`ghostc/detect/shapes.py`, generic secret / contract-id / tenant / internal-host /
+scoped-npm families) / `semantic` (`sentence-transformers` if the `[semantic]` extra is
+installed, else a stdlib char-3-gram cosine) — combined by **noisy-OR** (`1 − Π(1 − wᵢ)`;
+`exact` short-circuits to 1.0). A **reference graph** (`networkx`, `ghostc/detect/graph.py`:
+`const a = b` aliases, `require` destructuring, `obj.prop = x`, call args, `module.exports`,
+`process.env.X ↔ default literal`) propagates decaying taint (×0.85/hop) from strong
+occurrences, lifting laundered aliases (`flightProvider` → Meridian). A **decode** pass folds
+`'a' + 'b'`, `[…].join()` and base64 and re-scans. Each candidate gets `score` ∈ `[0,1]` and
+an `action`: `auto` (≥ `auto_threshold` **and** a hard structural signal; `restricted` never
+auto), `review`, or `ignore`. **Unconfigured entities are anchor-driven** — a proposal needs a
+scoped `@company/pkg`, a declared "known as: …" alias list, an `*.internal` host, a decoded
+name, or graph taint; weaker mentions only *attach* to an anchor by stem, so OSS libraries
+(`helmet`, `moment`, `swagger-jsdoc`) never propose. Output: ranked table + surface →
+`workspace/private/candidates.jsonl` + `discover.candidate_scored` / `discover.entity_proposed`
+audit events (surfaces hashed) + precision/recall vs `tests/expected/discover-groundtruth.json`.
+Modules: `ghostc/detect/{candidate,settings,tokenize,shapes,decode,graph,semantic,signals,scan}.py`
+· `ghostc/discover.py`. Config: the optional `detection:` block in `privacy.yaml`.
+
+`compile` now runs the same scan: with `detection.auto_alias: false` (default) the ghost tree
+is byte-identical to the matcher-only output and `review` candidates are written to the queue
++ `compile.candidate_review` audit; with `auto_alias: true` each unconfigured `auto` candidate
+gets a minted flat alias and is transformed (a `restricted` proposal blocks the run).
+
+### baseline — what it does
+Dumb keyword redaction: plain case-sensitive global string replace of every `real` + every
+`match[]` literal/identifier spelling → the kebab ghost alias (`REDACTED` for `strategy:
+remove`), longest spelling first. **No AST, no casing engine, no compound splice, no graph, no
+mapping store** (not reversible — that's the point). Deterministic; fresh `git init` + baseline
+commit; `baseline-spec.md` sibling. It corrupts identifiers (`initDatadog` → `initvendor-c`)
+and leaks every casing variant it was not literally configured with (`SKYROUTE_API_KEY`,
+`bookingCore`, `BOOKING_CORE_URL`). Module: `ghostc/baseline.py`.
+
+### apply-patch — what it does
+Reverse patch compiler: ghost PR diff → real PR diff. Two-pass per diff line — exact
+`ghost`→`real` literal (token-boundary anchored, longest first), then segment splicing for the
+remaining casings via `ghostc/aliasing.splice_span` (`vendorA`→`skyRoute`,
+`VENDOR_A_URL`→`SKYROUTE_URL`, `vendorAClient.js`→`skyRouteClient.js`); the reversible real
+"core" per entity is the identifier match spelling that segments into the most pieces, else a
+clean `real` token, else the whitespace-split words. Context lines are translated too so the
+diff applies. **Fail closed** (`Rejection`, exit 1, `patch.rejected` audit, nothing written):
+unmapped ghost-alias-shaped token · a real value present in the ghost diff (reported by entity
+id, never cleartext) · `--mapping-version` mismatch · duplicate ghost alias in the store.
+`--apply` runs `git apply --3way` onto `--branch` in `--real`. Audit: `patch.parsed` /
+`patch.entity_resolved` (per entity: `real_sha256`, `lossy`) / `patch.applied` /
+`patch.rejected`. Lossy: multi-word display names round-trip approximately in prose (code
+tokens are exact) and are flagged for the human review gate. Modules: `ghostc/patch.py`.
+
+### eval — what it does
+Builds both comparators from `--real`, then counts residual real-entity occurrences in each:
+**casing-aware** (`compile_repo(tree, dry_run=True)` in detector mode — the compiler's own
+matchers, the **primary metric**) and **strict** (`anchored_scan` over configured spellings —
+the `verify` / `groundtruth.json` method). MVP: no external agent, so task pass rate /
+approvals / wall-clock / tokens are `n/a`. Emits `workspace/eval-report.{md,csv}` + `eval.*`
+audit events. On the fixture: baseline **28** residual, compile **0**; strict reads 0/0 (every
+configured spelling is an exact keyword, so a keyword `sed` neutralises all of them — the blind
+spot the casing-aware detector exists to cover). Module: `ghostc/eval.py`.
+
+### verify — what it does
+Three fail-closed checks over the ghost tree: **leak_scan** (`ghostc/scanning.anchored_scan` —
+non-overlapping, `[^A-Za-z0-9_]`-bounded, longest-needle-first — over every mapping `real`
+value + every seed spelling in `privacy.yaml`), **mapping_leak** (`looks_like_mapping`: any
+mapping store / entry / `real_sha256` mention under the ghost), **build** (`yarn lint`;
+`skipped` without the toolchain unless `--require-build`). Emits `verify.scan` +
+`verify.pass`/`verify.block`; exits 1 on BLOCK. Modules: `ghostc/verify.py` · `ghostc/scanning.py`.
 
 ### compile — what it does
 tree-sitter (JS/TS/TSX/HCL) + a scoped fallback (`.env*`/`.json`/`.yml`/`.md`/…). Node-scoped edits
@@ -34,6 +114,15 @@ only (identifier / string-content / comment). One canonical kebab alias per enti
 occurrence by `ghostc/aliasing.py` (segment engine). Renames sensitive path components
 (`skyRouteClient.js` → `vendorAClient.js`). Fresh `git init` + one baseline commit in `workspace/ghost/`,
 never copies `.git`. Deterministic. Blocks if a `restricted` entity from `discover`/`human` lacks `approved_by`.
+
+**Import specifiers are kept, not aliased.** A `require('@vendor/sdk')` / `import … from '@vendor/sdk'`
+package specifier (and the same key in `package.json` `dependencies` etc.) matched by an entity is
+left verbatim — a renamed dependency does not resolve in the ghost environment. First-party
+specifiers (`./x`, `../x`) still rewrite (the target file is renamed too, so it stays consistent).
+Kept specifiers → `CompileResult.kept_specifiers` + `compile.import_specifier_kept` audit + a
+"Dependency names left un-aliased" section in `ghost-spec.md`; if a *seed* entity is involved,
+`compile` prints a stderr WARNING that `verify` will BLOCK. Override per entity with
+`rewrite_imports: true`.
 
 Modules: `ghostc/aliasing.py` · `ghostc/matching.py` · `ghostc/parsers/{treesitter,scoped}.py` · `ghostc/compile.py`
 
@@ -55,6 +144,26 @@ Modules: `ghostc/aliasing.py` · `ghostc/matching.py` · `ghostc/parsers/{treesi
 | 2026-08-30 | **Segment-based casing engine** (`aliasing.py`): one canonical kebab alias, re-cased per occurrence; sub-span splice so several entities in one compound token are each rewritten | Fixture has the same entity as `booking-core` / `bookingCore` / `BOOKING_CORE_URL` / `booking-core.internal` |
 | 2026-08-30 | `tree-sitter-language-pack` (not `tree-sitter-languages`) | Latter has no Python 3.14 wheel (caps at 3.11) |
 | 2026-08-30 | `compile` renames sensitive path components + writes a git baseline commit in `workspace/ghost/` | Filenames leak brands (`skyRouteClient.js`); the ghost PR needs a diff base. Working-agreement "never commit" is about the submission repo, not the throwaway ghost workspace |
+| 2026-08-30 | `tests/` suite added; `load_config` now rejects duplicate entity ids | Green `pytest` from a clean env is the Reproducibility signal. Dup ids can't be caught by JSON Schema and would silently shadow in `MappingStore.by_entity_id` — small hardening in `config.py`, covered by `test_config.py` |
+| 2026-08-30 | Leak scan (tests + future `verify`) uses non-overlapping `(?<![A-Za-z0-9_])…(?![A-Za-z0-9_])` matching, longest spelling first | `grep -F` substrings give false positives (`ip-a` in `strip-ansi`) and double-count nested spellings (`Northwind` inside `Northwind Airlines`) |
+| 2026-08-30 | Explicit boundary layout: `workspace/ghost/` + sibling `ghost-spec.md` cross; `workspace/private/{mapping,audit}` never cross. `compile` guards both directions (paths inside `--out` rejected; ghost tree re-scanned pre-commit) | Old layout put `mapping.json` (cleartext real values) one `ls` from the ghost, separated only by convention and an implicit `out_p.parent` trick. Structure now carries the boundary; guards + tests enforce it |
+| 2026-08-30 | Detection roadmap agreed: candidate **scoring** model (`Candidate{score, signals, action}`) → reference **graph** taint (alias propagation) → bounded **fuzzy** + structural shapes → token model for `scoped.py`. Feeds the human-review queue; measured vs `groundtruth.json` (precision/recall per layer) | Pure lexical matcher can't see aliases, near-misses, or unconfigured secrets. Scoring is the backbone the graph/fuzzy/token layers hang off and maps 1:1 to the `auto`/`auto_if_unambiguous`/`human` gates. Sequenced AFTER `verify` |
+| 2026-08-30 | `verify` build gate (`yarn lint`) is **best-effort**: `skipped` when `yarn`/`node_modules` absent, and that alone does not block. `--require-build` makes a skip a block | The MIT fixture ships no `node_modules`; a purist fail-closed would make local verification impossible. Leak + mapping checks are always hard gates; production/CI passes `--require-build` |
+| 2026-08-30 | One leak-scan implementation: `ghostc/scanning.anchored_scan`, reused by `verify` and by the test suite (`conftest.scan_entity_hits` now delegates) | Was duplicated as a regex in `conftest.py`; drift between the tested scanner and the shipped one would be a silent hole |
+| 2026-08-30 | `baseline` reuses `compile`'s file-walk helpers (`_excluded`, `_git_baseline`, `_rmtree`, `_boundary_internal`) rather than re-deriving them | Same "one implementation" principle as `anchored_scan`; the two paths must walk the tree identically for `eval` to be a fair comparison |
+| 2026-08-30 | `eval` primary metric = **casing-aware residual** via `compile_repo(tree, dry_run=True)` in detector mode, not strict `anchored_scan` | On this fixture every configured spelling is an exact keyword, so a keyword `sed` drives the strict scan to 0 for both approaches — it can't measure the win. The compiler's own matchers (which know every casing) applied symmetrically to both trees do. Zero new detection code; reuses the shipped pipeline |
+| 2026-08-30 | `eval` MVP stops at the leak metric; the 10+1 tasks + agent-run metrics deferred to the external-agent iteration | The primary metric (leak count) is what the changelog's baseline row needs and needs no agent. Wiring an external coding agent + reviewing the task list (open question 3) is its own slice |
+| 2026-08-30 | `apply-patch` reverses via **the identifier match spelling with the most segments** (`skyRoute`→`[sky,route]`, not `skyroute`→`[skyroute]`), plus an exact `ghost`→`real` literal pass first | Code identifiers and file paths then round-trip exactly (`vendorAClient.js`→`skyRouteClient.js`); the cost is env-var underscoring can differ (`VENDOR_A_URL`→`SKY_ROUTE_URL`) — still a valid token, caught by the human review gate |
+| 2026-08-30 | `apply-patch` is **lossy for multi-word display names** by design (`Northwind Airlines`, `SkyRoute Data Ltd`) and flags them rather than trying to be clever | Forward is many-to-one (`Northwind Airlines` / `Northwind` / `NWA` → `client-a`); reverse can't recover which. The pipeline already has a human review gate (PR-consistency agent) downstream — same limitation as open question 1 |
+| 2026-08-30 | `apply-patch` rejections name the **entity id**, never the cleartext real value, in both the audit event and the CLI message | Audit contract: no real sensitive value in the log. `test_rejection_audit_carries_no_cleartext` enforces it |
+| 2026-08-30 | `CHANGELOG.md` rows are capability milestones (baseline / compiler / verify / reverse+eval / next), not git SHAs | The user owns iteration boundaries / commits; the changelog stays stable as commits are squashed or reordered. Each row still links a test + an audit-event family |
+| 2026-08-30 | Candidate score = **noisy-OR** over independent signal weights (`1 − Π(1 − wᵢ)`), `exact` short-circuits to 1.0; `action` needs score ≥ `auto_threshold` **and** a hard structural signal (exact/stem/import/graph≥0.9) — fuzzy/semantic/shape alone stay `review` | Additive evidence should raise confidence without any one weak signal dominating; the hard-signal gate keeps a high fuzzy score from auto-transforming and keeps the fixture ghost byte-identical when `auto_alias` is off |
+| 2026-08-30 | Unconfigured proposals are **anchor-driven**: a new entity needs a scoped `@company/pkg`, a "known as: …" alias list, an `*.internal` host, a decoded name, or reference-graph taint; weak mentions only *attach* to an anchor by stem | Structural "distinctive identifier" heuristics can't tell a vendor from a library — an early version proposed `helmet` / `moment` / `swagger-jsdoc`. Anchors give precision (0 OSS false positives on the fixture) at the cost of missing a truly context-free brand mention |
+| 2026-08-30 | Semantic signal is an **optional** `[semantic]` extra (`sentence-transformers`); absent, it falls back to a stdlib char-3-gram cosine and is capped low + review-only either way | `sentence-transformers` pulls ~2 GB of torch; the project's "green pytest from a clean env" reproducibility signal outweighs a stronger semantic tier that is the weakest evidence class anyway |
+| 2026-08-30 | New adversarial fixture `fixtures/inject/src/integrations/adversary.js` (fictional *Meridian* / *Contoso*, **unconfigured**); excluded from the `node --check`/`yarn lint` gate | The base repo has no laundered brands; the detection layer needs a corpus of real evasions (alias lists, `@scope/pkg`, env-var laundering, `x = y` chains, base64, split strings). Left unconfigured so `discover` recall is measured "from code alone". It is deliberately not lint-clean |
+| 2026-08-30 | `compile` is threshold-driven via the same scan; `detection.auto_alias` (config flag, default **off**) gates minting aliases for unconfigured `auto` candidates. Off → matcher output byte-identical + a review queue; on → mint + transform, `restricted` proposal blocks | User asked for the compiler to "compile whatever hits a certain threshold", configurable on/off. Off-by-default keeps every existing test and the eval number unchanged; on-by-choice neutralises `discover`'s proposals (Meridian → `vendor-e`) |
+| 2026-08-30 | Audit schema gains `discover.candidate_scored` / `compile.candidate_review`; discover/compile hash the surface into `subject.real_sha256` (schema's only free string key) | `discover` runs on the *real* repo, so its events must carry no cleartext — same contract as `compile.entity_detected`. `test_discover.py` asserts no seed real value in the audit file |
+| 2026-08-30 | **`compile` keeps package import specifiers verbatim** (`require`/`import`/`jest.mock` args + `package.json` dependency keys); rewrites only first-party (`./`, `../`, `~`) specifiers. Per-entity `rewrite_imports: true` forces the old behaviour | A renamed dependency (`@vendor-e/flight-sdk`) does not exist on any registry → the ghost fails `yarn install` / throws `MODULE_NOT_FOUND`. Any *resolvable* rewrite (`npm:` alias, `file:` shim) has to name the real package somewhere the ghost can read, which re-leaks it. So: keep it, record it in the ghost spec + audit, let the human decide. Surfaced by the `auto_alias` Meridian run (its whole detection signal is the scoped package) |
 
 ## In scope (hackathon)
 
@@ -77,6 +186,28 @@ incremental/persistent sync (Ph4) · GitHub/Jira integration (Ph10) · separate 
 - `verify`'s leak scan must use `\b`-anchored matching (short aliases like `ip-a` substring-hit
   `strip-ansi`, though only inside the excluded `yarn.lock`).
 
+## Known limits (discover, v1)
+
+- **Anchor-or-nothing for proposals**: a genuinely context-free brand mention (a vendor named
+  only once in prose, no package / alias list / host / graph edge) is not proposed. This is the
+  deliberate trade for zero OSS-library false positives.
+- **Graph is scope-insensitive** (node id = bare identifier name); two locals with the same
+  name in different files share taint. Decays fast and never auto-transforms on the graph
+  signal alone unless already ≥ 0.9, so the blast radius is small.
+- **Decode pass is shallow**: folds literal `+` / `[...].join()` / base64, but not values that
+  flow through variables first (`const p = 'meri'; const q = 'dianaero'; p + q`). Review-only.
+- **`adversary.js` Contoso lands at 0.83 → `review`, not `auto`** even with `auto_alias` on —
+  the internal-host anchor plus env/string mentions don't reach `auto_threshold` (0.90). Raise
+  `detection.auto_threshold` down or add a `match[]` seed to compile it automatically.
+- Semantic n-gram fallback is weak; the "semantic only" tier rarely clears `review_threshold`
+  without the `[semantic]` extra installed.
+- **Kept import specifiers still reveal the dependency.** `compile` leaves a package name like
+  `@meridianaero/flight-sdk` verbatim (so the ghost resolves) and flags it in the ghost spec —
+  it does not hide it. Only *inline* dep maps in `.js` (e.g. `adversary.js`'s `vendorDependencies`
+  object, not a real `package.json`) and dynamically-built specifiers still get aliased.
+- `rewrite_imports: true` on a seed makes the ghost internally consistent but the renamed
+  package still won't `yarn install` — use it only when the private registry is reachable.
+
 ## Workflow (target)
 
 ```
@@ -95,16 +226,24 @@ task text
 
 ## Metrics (fill after eval runs)
 
-Ad-hoc check (not the eval harness): `compile` leak scan over `workspace/ghost` for 16 real
-tokens → **0** occurrences. `node --check` passes on all 3 ghost JS files. Baseline not yet run.
+Now measured by `ghostc eval` (`workspace/eval-report.{md,csv}`, derived from the audit log).
+Also enforced by `tests/test_compile.py` + `tests/test_fixture_groundtruth.py` +
+`tests/test_baseline.py` + `tests/test_eval.py` + `tests/test_scoring.py` + `tests/test_discover.py`. `pytest`: 205 passed / 1 skipped.
 
-| Metric | Baseline (`sed` redaction) | Solution | Change |
+Groundtruth: 67 configured-spelling occurrences in the real repo (adversary.js adds one `northwind` hit).
+
+| Metric | Baseline (`sed` redaction) | Solution (`compile`) | Change |
 |---|---|---|---|
-| Leak count (real sensitive values exposed to external agent) — target 0 | — | — | — |
-| Task pass rate (real PR applies + `yarn lint` + `yarn test` + acceptance) | — | — | — |
-| Human approvals per task | — | — | — |
-| Wall-clock per task | — | — | — |
-| Token cost per task | — | — | — |
+| Residual entity occurrences, casing-aware (exposed to external agent) — target 0 | **28** | **0** | −28 (100%) |
+| Strict token leaks (`verify` / groundtruth method) — target 0 | 0 | 0 | can't distinguish on this fixture |
+| Reversible (ghost PR → real PR) | no | yes (mapping store) | — |
+| Task pass rate (real PR applies + `yarn lint` + `yarn test` + acceptance) | n/a — needs agent harness | n/a | — |
+| Human approvals per task | n/a | n/a | — |
+| Wall-clock per task | n/a | n/a | — |
+| Token cost per task | n/a | n/a | — |
+
+`node --check` passes on all 3 ghost JS files; the baseline ghost corrupts JS identifiers
+(`initDatadog` → `initvendor-c`) — redaction breaking code is part of what the baseline shows.
 
 ## Eval cases (10 + 1 hard, on the fixture)
 
@@ -123,8 +262,12 @@ tokens → **0** occurrences. `node --check` passes on all 3 ghost JS files. Bas
 
 | File | Location | Boundary |
 |---|---|---|
-| ghost repo | `workspace/ghost/` | crosses (external agent sees it) |
-| ghost spec | `workspace/ghost-spec.md` | crosses |
-| mapping store | `workspace/mapping.json` | **never crosses** (contains real values) |
-| audit log | `workspace/audit.jsonl` | never crosses (hashes only, no secrets) |
-| eval report | `workspace/eval-report.md` / `.csv` | submission artifact |
+| ghost repo | `workspace/ghost/` | crosses (external agent sees it) — mirrors real, nothing else |
+| ghost spec | `workspace/ghost-spec.md` | crosses (sibling of the ghost, never written inside it) |
+| mapping store | `workspace/private/mapping.json` | **never crosses** (contains real values) |
+| audit log | `workspace/private/audit.jsonl` | never crosses (hashes only, no secrets) |
+| baseline repo | `workspace/baseline-ghost/` + `workspace/baseline-spec.md` | eval comparator only — **not** privacy-safe, never handed to an agent |
+| eval report | `workspace/eval-report.md` / `.csv` | submission artifact (derived from the audit log) |
+
+`compile` refuses to run if any of `--spec` / `--mapping` / `--audit` resolves inside `--out`,
+and re-scans the ghost tree for stray metadata before the baseline commit (fail closed).

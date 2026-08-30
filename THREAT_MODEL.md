@@ -11,8 +11,8 @@ Scope: the hackathon slice. Production hardening is roadmap Phase 11 (`TODO.md`)
 ## What must never cross
 
 - The real repository
-- The mapping store (`workspace/mapping.json`) — contains real->ghost in cleartext
-- The audit log (even though it stores only hashes of real values)
+- The mapping store (`workspace/private/mapping.json`) — contains real->ghost in cleartext
+- The audit log (`workspace/private/audit.jsonl`) — even though it stores only hashes of real values
 - `privacy.yaml` `entities[].real` values
 - Any credential, token, private key, connection string
 - Real task text (Jira), real client names, real commercial-relationship details
@@ -24,7 +24,7 @@ Scope: the hackathon slice. Production hardening is roadmap Phase 11 (`TODO.md`)
 | External AI provider | Sees everything given to the coding agent; may log/retain it | Privacy by construction: the ghost is already safe. Verification agent gate. Leak metric proves it. |
 | Compromised / misbehaving coding agent | Executes arbitrary code in the ghost workspace; tries to exfiltrate | Ghost workspace has no real credentials and no network route to company services (enforced by the run sandbox, not by asking the model). |
 | Curious reviewer of the ghost PR | Reads the ghost diff | Ghost diff contains only ghost entities; reverse compiler is the only path back. |
-| Mapping-store leak | Obtains `mapping.json` | Full de-anonymization. Treated as crown-jewel: boundary-internal only, gitignored, never an output that crosses. (Encryption at rest = Phase 11.) |
+| Mapping-store leak | Obtains `mapping.json` | Full de-anonymization. Treated as crown-jewel: lives under `workspace/private/`, gitignored, never an output that crosses. `compile` refuses to write it (or the audit log) anywhere inside the ghost repo. (Encryption at rest = Phase 11.) |
 
 ## Privacy-level decision test
 

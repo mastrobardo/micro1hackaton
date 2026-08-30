@@ -37,8 +37,43 @@ scanned, 7 changed, 3 renamed, 13 entities, **0 leaks**, deterministic, ghost JS
   ("Never commit" working-agreement is about the submission repo, not this throwaway.)
 - `--dry-run` computes + prints, writes nothing. Blocks if a `restricted` entity from
   `discover`/`human` lacks `approved_by`.
-- Artifacts: `workspace/ghost/`, `ghost-spec.md` (no real values), `mapping.json` (13 frozen
-  entries + `{file,line}` occurrences), `audit.jsonl` (`real_sha256` only).
+- **Boundary layout** (2026-08-30): `workspace/ghost/` + sibling `workspace/ghost-spec.md`
+  cross the boundary; `workspace/private/{mapping.json,audit.jsonl}` never cross. CLI flags
+  `--out` / `--spec` / `--mapping` / `--audit`. `compile_repo` raises if spec/mapping/audit
+  resolve inside `--out` (`_assert_outside_ghost`) and re-scans the ghost tree for stray
+  metadata before the git baseline (`_assert_ghost_tree_is_clean`). The ghost tree mirrors
+  the real repo and nothing else.
+- Artifacts: `workspace/ghost/`, `workspace/ghost-spec.md` (no real values),
+  `workspace/private/mapping.json` (13 frozen entries + `{file,line}` occurrences),
+  `workspace/private/audit.jsonl` (`real_sha256` only).
+
+## Threshold-driven (2026-08-30, Iteration 6)
+
+`compile_repo` now runs the `ghostc discover` scan (`detect=True` default). With
+`detection.auto_alias: false` (default) the ghost tree is **byte-identical** to the
+matcher-only output — the scan only writes `workspace/private/candidates.jsonl` +
+`compile.candidate_review` audit events for the human review queue. With `auto_alias: true`,
+each unconfigured `auto` candidate becomes a synthetic `source: discovered` entity (minted
+flat alias) and is transformed; a `restricted` proposal raises `BLOCKED`. Full detail:
+[[detection-scoring]].
+
+## Import specifiers kept, not aliased (2026-08-30)
+
+`compile` leaves **package** import specifiers verbatim — `require('@x/sdk')` /
+`import … from '@x/sdk'` / `jest.mock('@x/…')` args (via a tree-sitter pre-pass,
+`ghostc/parsers/treesitter._spec_string_ranges`) **and** `package.json`
+`dependencies`/`devDependencies`/`peerDependencies`/`optionalDependencies`/`resolutions`
+KEYS (`ghostc/parsers/scoped._compile_package_json`). Rationale: a renamed dependency
+resolves nowhere → the ghost fails `yarn install` / `MODULE_NOT_FOUND`; any resolvable
+rewrite re-leaks the real name. First-party specifiers (`./`, `../`, `~`) still rewrite
+(the target file is renamed too → consistent). `node:` builtins are kept.
+`matching.transform_text(text, "import_specifier", …)` returns the matching `Hit`s with
+`kept=True` and unchanged text. `compile` routes them to
+`CompileResult.kept_specifiers` + `compile.import_specifier_kept` audit + a
+"Dependency names left un-aliased" section in `ghost-spec.md`; a *seed* entity in a
+specifier → stderr WARNING that `verify` will BLOCK. Per-entity `rewrite_imports: true`
+(schema) forces the old rewrite-everywhere behaviour. Not yet covered: dynamically-built
+specifiers and inline dep-map objects inside `.js` (`adversary.js` `vendorDependencies`).
 
 ## Known limits
 
