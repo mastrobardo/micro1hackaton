@@ -1,6 +1,8 @@
 /**
  * Internal service registry — Northwind platform services reachable on the private network.
  * Hostnames and the management IP are internal topology and must not leave the boundary.
+ *
+ * Service owner: Priya Nair <priya.nair@northwind-internal.net>
  */
 const SERVICES = {
   bookingCore: {

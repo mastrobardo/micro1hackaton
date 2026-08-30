@@ -3,6 +3,10 @@
 # `entities` below are the SEED set: the synthetic sensitive entities injected into the
 # fixture by fixtures/apply.sh. Entities found by `ghostc discover` are appended with
 # source: discovered and (for `restricted`) require approved_by before use.
+#
+# Ghost aliases use a flat, type-prefixed scheme (vendor-a, service-a, region-a, ...).
+# The compiler renders per-context casings from the canonical kebab form:
+# service-a -> SERVICE_A (env), serviceA (identifier), service-a.example (host).
 
 version: 1
 mapping_version: 1
@@ -43,11 +47,12 @@ entities:
     real: "Northwind Airlines"
     match:
       - { kind: literal, value: "Northwind" }
+      - { kind: identifier, value: "northwind" }
       - { kind: identifier, value: "NWA" }
     kind: client
     level: restricted
     strategy: synthetic_id
-    ghost: "ClientA"
+    ghost: "client-a"
     note: "Fictional client. Direct identity — NDA-bound in the scenario."
     source: seed
 
@@ -56,11 +61,12 @@ entities:
     real: "SkyRoute Data Ltd"
     match:
       - { kind: literal, value: "SkyRoute" }
-      - { kind: regex, value: "SKYROUTE_[A-Z_]+" }
+      - { kind: identifier, value: "skyroute" }
+      - { kind: identifier, value: "skyRoute" }
     kind: vendor
     level: confidential
     strategy: semantic_alias
-    ghost: "FlightDataProviderA"
+    ghost: "vendor-a"
     note: "Fictional flight-schedule data supplier. Commercial agreement — contract-sensitive."
     source: seed
 
@@ -68,20 +74,23 @@ entities:
     real: "AeroFeed Systems"
     match:
       - { kind: literal, value: "AeroFeed" }
+      - { kind: identifier, value: "aerofeed" }
     kind: vendor
     level: confidential
     strategy: semantic_alias
-    ghost: "FlightDataProviderB"
+    ghost: "vendor-b"
     note: "Fictional second data supplier — target of the HARD eval case (provider swap)."
     source: seed
 
   # --- low-sensitivity vendors (the 'Datadog is not that sensitive' case) --
   - id: vendor_datadog
     real: "Datadog"
+    match:
+      - { kind: literal, value: "datadoghq" }
     kind: vendor
     level: internal
     strategy: semantic_alias
-    ghost: "MetricsProviderA"
+    ghost: "vendor-c"
     note: "Ubiquitous observability vendor; presence reveals nothing competitive."
     source: seed
 
@@ -90,7 +99,7 @@ entities:
     kind: vendor
     level: internal
     strategy: semantic_alias
-    ghost: "ErrorTrackingProviderA"
+    ghost: "vendor-d"
     source: seed
 
   # --- internal services ---------------------------------------------------
@@ -99,7 +108,7 @@ entities:
     kind: internal_service
     level: confidential
     strategy: semantic_alias
-    ghost: "internal-service-a"
+    ghost: "service-a"
     source: seed
 
   - id: svc_pricing
@@ -107,7 +116,7 @@ entities:
     kind: internal_service
     level: confidential
     strategy: semantic_alias
-    ghost: "internal-service-b"
+    ghost: "service-b"
     source: seed
 
   - id: svc_fare_cache
@@ -115,7 +124,7 @@ entities:
     kind: internal_service
     level: confidential
     strategy: semantic_alias
-    ghost: "internal-service-c"
+    ghost: "service-c"
     source: seed
 
   # --- infrastructure identifiers ----------------------------------------
@@ -124,7 +133,7 @@ entities:
     kind: domain
     level: confidential
     strategy: synthetic_endpoint
-    ghost: "internal-endpoint-a.example"
+    ghost: "host-a.example"
     source: seed
 
   - id: infra_private_ip
@@ -132,7 +141,7 @@ entities:
     kind: infra_identifier
     level: confidential
     strategy: synthetic_id
-    ghost: "PRIVATE_IP_001"
+    ghost: "ip-a"
     source: seed
 
   - id: infra_region
@@ -140,7 +149,7 @@ entities:
     kind: infra_identifier
     level: confidential
     strategy: generalize
-    ghost: "production-region-a"
+    ghost: "region-a"
     source: seed
 
   - id: infra_aws_account
@@ -148,8 +157,20 @@ entities:
     kind: infra_identifier
     level: restricted
     strategy: synthetic_id
-    ghost: "AWS_ACCOUNT_001"
+    ghost: "account-a"
     note: "Account id is client-bound in the scenario."
+    source: seed
+
+  # --- person (PII) --------------------------------------------------------
+  - id: person_service_owner
+    real: "Priya Nair"
+    match:
+      - { kind: literal, value: "priya.nair@northwind-internal.net" }
+    kind: person
+    level: restricted
+    strategy: synthetic_id
+    ghost: "person-a"
+    note: "Fictional internal engineer named as a service owner. PII — direct identity."
     source: seed
 
   # --- secret ----------------------------------------------------------

@@ -1,53 +1,35 @@
-# Session TODO — 2026-08-29
+# Session TODO — 2026-08-30
 
-Session-scoped checklist (easier to skim than the CLI todo). Long-term plan lives in `TODO.md`; running status in `PROGRESS.md`.
+Session-scoped checklist. Long-term plan lives in `TODO.md`; running status in `PROGRESS.md`.
 
-## This session: scaffold + entity discovery
+## Done this session: `ghostc compile`
 
-- [x] Read `TODO.md` (roadmap) and the hackathon PDF (rules, judging, deliverables)
-- [x] Agree long-term goal + hackathon-scoped slice
-- [x] Pick reproducible base repo → `hagopj13/node-express-boilerplate` (MIT, offline tests)
-- [x] Clone base repo → `../node-express-boilerplate`
-- [x] Scaffold docs: `README.md`, `PROGRESS.md`, `CHANGELOG.md`, `ARCHITECTURE.md`, `THREAT_MODEL.md`
-- [x] Scaffold `schemas/` (privacy-config, mapping, audit-event)
-- [x] Scaffold `privacy.yaml` (levels + strategies + synthetic entities)
-- [x] Scaffold `ghostc/` Python CLI skeleton (`discover`/`compile`/`verify`/`apply-patch`/`eval`)
-- [x] Scaffold `fixtures/` (synthetic sensitive-entity layer + `infra/*.tf`)
-- [x] Scaffold `scripts/` (`demo.sh`, `eval.sh`) + `.gitignore`
-- [x] Install package, smoke-test CLI (`ghostc validate-config` works; 13 seed entities OK)
-- [x] Build `workspace/real/` via `fixtures/apply.sh`
-- [x] Run entity discovery (manual grep pass — discovery agent not built yet)
-- [ ] **← YOU: approve the entity list** (see "Discovery result" below) before building `compile`
+- [x] Flat alias scheme in `privacy.yaml` (`vendor-a`, `service-a`, `region-a`, `ip-a`, `client-a`, …)
+- [x] Added `person_service_owner` seed entity (`Priya Nair`) + injected owner line into `internalServices.js`
+- [x] `privacy.yaml` `match[]` stems: `northwind`, `skyroute`/`skyRoute`, `aerofeed`, `datadoghq` literal; dropped the `SKYROUTE_[A-Z_]+` regex
+- [x] `ghostc/aliasing.py` — segment casing engine (`analyze` / `render` / `splice_span` / `render_like`)
+- [x] `ghostc/matching.py` — entity matchers, longest-span + remove/level priority, multi-entity compound tokens
+- [x] `ghostc/parsers/treesitter.py` (JS/TS/TSX/HCL) + `ghostc/parsers/scoped.py` (`.env*`/`.json`/`.yml`/`.md`/…)
+- [x] `ghostc/compile.py` — walk + exclusions, ghost tree, path rename, `git` baseline, mapping store, `ghost-spec.md`, audit events
+- [x] Wired `compile` into `cli.py` (+ approval-gate pre-flight); deps → `tree-sitter-language-pack`
+- [x] `cli.md` — manual test walkthrough, every command verified
+- Result: 84 files scanned, 7 changed, 3 renamed, 13 entities, **0 leaks**, deterministic, ghost JS parses
 
-## Next session (not now)
+## Next session (in order)
 
-- [ ] Implement `ghostc compile` — tree-sitter (JS/TS) node-scoped replacement + stable aliases
-- [ ] Implement `ghostc verify` — leak scan + `yarn lint` gate (fail closed)
-- [ ] Baseline: `sed` keyword redaction path
+- [ ] **`tests/` suite** (nothing on disk yet):
+  - `test_aliasing.py` — `analyze`/`render` round-trip, `splice_span` sub-spans, bare-run `-` fallback
+  - `test_matching.py` — remove/level tie priority, multi-entity compound token, name-shaped literal casing
+  - `test_compile.py` — 0 real values in ghost, determinism/idempotence, `.git` not copied, rename, spec has no real values, 3+ levels in spec, frozen-alias reuse on 2nd run
+  - backfill scaffold suite from the `testing-approach` memory: `test_schemas` / `test_config` / `test_mapping` / `test_audit` / `test_fixture_groundtruth` (+ `tests/expected/groundtruth.json`) / `test_cli` / `test_determinism`; `test_fixture_builds` skips if `node`/`terraform` absent
+- [ ] `ghostc verify` — `\b`-anchored leak scan + `yarn lint` gate, fail closed
+- [ ] Baseline `sed` keyword-redaction path
 - [ ] `ghostc eval` — 10 cases, baseline vs solution, metric table
 - [ ] `ghostc apply-patch` — ghost diff → real diff + ambiguity rejection
-- [ ] Wire audit log through every step; start filling `CHANGELOG.md` with evidence
-
-## Discovery result (for your approval)
-
-**Seed entities** — 12 of 13 confirmed present in `workspace/real`:
-`Northwind Airlines`, `SkyRoute Data Ltd`, `Datadog`, `Sentry`, `booking-core`, `pricing-svc`,
-`fare-cache`, `api.northwind-internal.net`, `10.20.4.7`, `nwa-prod-eu-west-1`, `447015923388`,
-`sk_live_northwind_…`. `AeroFeed` (swap target for case 10) is intentionally absent until the agent adds it.
-
-**New candidates in the base repo → all `public`, no transform:**
-
-| Candidate | Proposed | Why |
-|---|---|---|
-| `support@yourapp.com` (`EMAIL_FROM`), `email-server` SMTP placeholder, `Ethereal` | public | placeholders / ubiquitous test service |
-| `mongodb://127.0.0.1:27017/...` | public | localhost only |
-| `nodemailer`, `passport-jwt`, `swagger`, `mongoose`, `coveralls` | public | OSS libraries |
-
-**Conclusion:** the base repo has no sensitive surface of its own — ground truth = exactly the
-13 seed entities in `privacy.yaml`. Clean for the leak metric.
+- [ ] Start filling `CHANGELOG.md` with evidence-linked rows
 
 ## Open questions for you
 
-1. Approve the discovery result above (nothing to add to `privacy.yaml`)?
-2. The 10 eval tasks (`PROGRESS.md` → "Eval cases") — good set or swap any?
-3. Alias naming: keep `FlightDataProviderA` / `internal-service-a` style, or prefer flatter `vendor-a`?
+1. Ghost prose casing inconsistency (`client-a` / `Client A` / `ClientA`) — leave as-is (reversible, cosmetic) or add a normalisation pass?
+2. File renaming in `compile` (sensitive path components + git baseline commit in `workspace/ghost/`) — keep?
+3. The 10 eval tasks (`PROGRESS.md` → "Eval cases") — still deferred; review before `eval` is built.

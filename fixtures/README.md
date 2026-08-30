@@ -14,11 +14,14 @@ Everything here is invented. There are no real credentials, clients, or endpoint
 |---|---|
 | `inject/src/integrations/skyRouteClient.js` | `SkyRoute Data Ltd` vendor, `api.northwind-internal.net`, `SKYROUTE_API_KEY` |
 | `inject/src/integrations/observability.js` | `Datadog`, `Sentry` (low-sensitivity vendors) |
-| `inject/src/integrations/internalServices.js` | `booking-core`, `pricing-svc`, `fare-cache`, `10.20.4.7` |
+| `inject/src/integrations/internalServices.js` | `booking-core`, `pricing-svc`, `fare-cache`, `10.20.4.7`, `Priya Nair` (person / PII) |
 | `inject/.env.northwind.example` | `Northwind Airlines` client, vendor key, region |
 | `infra/main.tf`, `infra/variables.tf` | `nwa-prod-eu-west-1`, AWS account `447015923388`, same vendor + IP (HCL path) |
 
-Ground truth for the metric is `privacy.yaml` `entities` (all `source: seed`).
+Ground truth for the metric is `privacy.yaml` `entities` (all `source: seed`). The seed set
+spans three transform levels — `internal` (Datadog, Sentry), `confidential` (vendor / service /
+infra topology), `restricted` (client identity, AWS account, API key, `Priya Nair` PII). The
+`public` level is exercised in the `discover` phase (candidates classified public and kept).
 
 ## Apply
 
