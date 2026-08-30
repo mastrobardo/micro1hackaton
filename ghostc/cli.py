@@ -61,12 +61,36 @@ def discover(repo: str, config_path: str) -> None:
 
 @main.command()
 @click.option("--repo", required=True, type=click.Path())
-@click.option("--config", "config_path", default="privacy.yaml", type=click.Path())
-@click.option("--out", default="workspace/ghost", type=click.Path())
-@click.option("--dry-run", is_flag=True)
-def compile(repo: str, config_path: str, out: str, dry_run: bool) -> None:
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--out", default="workspace/ghost", show_default=True, type=click.Path())
+@click.option("--mapping", "mapping_path", default="workspace/mapping.json",
+              show_default=True, type=click.Path())
+@click.option("--audit", "audit_path", default="workspace/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
+def compile(repo: str, config_path: str, out: str, mapping_path: str,
+            audit_path: str, dry_run: bool) -> None:
     """Compile REPO into a privacy-safe ghost repo + ghost spec."""
-    raise SystemExit(f"ghostc compile: {_STUB}")
+    from ghostc.compile import compile_repo
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    pending = entities_needing_approval(cfg)
+    if pending:
+        names = ", ".join(e["id"] for e in pending)
+        raise SystemExit(
+            f"BLOCKED: {len(pending)} restricted entity(ies) awaiting human approval: {names}\n"
+            "Add `approved_by:` in the config before compiling."
+        )
+
+    result = compile_repo(repo, config_path=config_path, out=out,
+                          mapping_path=mapping_path, audit_path=audit_path,
+                          dry_run=dry_run)
+    click.echo(result.summary())
 
 
 @main.command()

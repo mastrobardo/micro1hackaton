@@ -5,7 +5,9 @@ metadata:
   type: project
 ---
 
-The scaffold phase (before `ghostc compile` exists) is tested with a `pytest` suite under `tests/`. Run: `pip install -e ".[dev]" && pytest -q`. Green from a clean env is the Reproducibility (15 pts) signal for judging.
+**STATUS 2026-08-30: the `tests/` suite is NOT yet on disk.** `ghostc compile` landed first (see [[compiler-and-alias-model]]); the suite below is the next task. When writing it, add `test_aliasing.py` (segment engine round-trips + `splice_span`), `test_matching.py` (remove/level tie priority, multi-entity compound tokens), and `test_compile.py` (0 real values in ghost, determinism, `.git` not copied, path rename, spec has no real values, frozen-alias reuse). `test_fixture_groundtruth.py` must match on token boundaries, not `grep -F` substrings.
+
+The scaffold phase is tested with a `pytest` suite under `tests/`. Run: `pip install -e ".[dev]" && pytest -q`. Green from a clean env is the Reproducibility (15 pts) signal for judging.
 
 What it covers:
 - `test_schemas.py` — the 3 JSON schemas are valid Draft 2020-12; `privacy.yaml` + sample `mapping.json` / `audit.jsonl` validate.
