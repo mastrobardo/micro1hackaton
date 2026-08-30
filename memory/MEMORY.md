@@ -10,4 +10,5 @@ Canonical location for this project's memory (in-repo since 2026-08-29).
 - [Verify and leak scan](verify-and-leak-scan.md) — `ghostc verify` fail-closed gate (leak / mapping / build) + `anchored_scan`, the one shared leak-scan primitive
 - [Baseline and eval](baseline-and-eval.md) — `ghostc baseline` (fair keyword-redaction comparator) + `ghostc eval` (casing-aware residual metric: baseline 28 vs compile 0 on the fixture)
 - [Reverse patch compiler](reverse-patch-compiler.md) — `ghostc apply-patch` (ghost PR diff → real PR diff), the two-pass translation, fail-closed rejects, known lossiness; `CHANGELOG.md`
-- [Testing approach](testing-approach.md) — pytest suite ON DISK + green (131 pass on fixture, 0 fails); leak scanner is `ghostc/scanning.anchored_scan`
+- [Detection scoring](detection-scoring.md) — `ghostc discover` candidate scoring (noisy-OR signals), reference graph taint, anchor-driven proposals, threshold-driven `compile` (`detection.auto_alias`); adversary.js fixture
+- [Testing approach](testing-approach.md) — pytest suite ON DISK + green (205 pass on fixture, 0 fails); leak scanner is `ghostc/scanning.anchored_scan`

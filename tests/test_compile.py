@@ -105,7 +105,8 @@ def test_determinism_across_independent_runs(tmp_path, real_repo, privacy_yaml):
         out = tmp_path / f"run{i}"
         compile_repo(str(real_repo), config_path=str(privacy_yaml),
                      out=str(out / "ghost"), mapping_path=str(out / "m.json"),
-                     audit_path=str(out / "a.jsonl"))
+                     audit_path=str(out / "a.jsonl"),
+                     candidates_path=str(out / "candidates.jsonl"))
         trees.append(read_tree(out / "ghost"))
         mappings.append(_norm_mapping(out / "m.json"))
     assert trees[0] == trees[1]
@@ -116,7 +117,8 @@ def test_frozen_alias_reused_on_second_run(tmp_path, real_repo, privacy_yaml):
     from ghostc.compile import compile_repo
 
     kw = dict(config_path=str(privacy_yaml), mapping_path=str(tmp_path / "m.json"),
-              audit_path=str(tmp_path / "a.jsonl"))
+              audit_path=str(tmp_path / "a.jsonl"),
+              candidates_path=str(tmp_path / "candidates.jsonl"))
     first = compile_repo(str(real_repo), out=str(tmp_path / "g1"), **kw)
     second = compile_repo(str(real_repo), out=str(tmp_path / "g2"), **kw)
 
@@ -159,3 +161,140 @@ def test_ghost_javascript_still_parses(compiled):
     for js in (compiled.ghost / "src" / "integrations").glob("*.js"):
         r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True)
         assert r.returncode == 0, f"{js.name}: {r.stderr}"
+
+
+# -- threshold-driven detection layer ---------------------------------------
+
+def test_compile_writes_candidates_and_review_audit(compiled):
+    from tests.conftest import load_jsonl
+
+    cand = compiled.mapping.parent / "candidates.jsonl"
+    assert cand.exists()
+    rows = load_jsonl(cand)
+    assert rows and all({"surface", "score", "action"} <= r.keys() for r in rows)
+    events = {r["event"] for r in load_jsonl(compiled.audit)}
+    assert "compile.candidate_review" in events
+
+
+def test_detection_off_matches_matcher_only_output(tmp_path, real_repo, privacy_yaml):
+    from ghostc.compile import compile_repo
+
+    kw = dict(config_path=str(privacy_yaml), audit_path=str(tmp_path / "a.jsonl"))
+    on = compile_repo(str(real_repo), out=str(tmp_path / "on"),
+                      mapping_path=str(tmp_path / "on.json"),
+                      candidates_path=str(tmp_path / "c.jsonl"), detect=True, **kw)
+    off = compile_repo(str(real_repo), out=str(tmp_path / "off"),
+                       mapping_path=str(tmp_path / "off.json"), detect=False, **kw)
+    # auto_alias defaults off → the ghost tree is byte-identical either way
+    assert read_tree(tmp_path / "on") == read_tree(tmp_path / "off")
+    assert set(on.entities) == set(off.entities)
+
+
+def test_auto_alias_mints_and_transforms_a_discovered_entity(tmp_path, real_repo, repo_root):
+    import yaml
+
+    from ghostc.compile import compile_repo
+
+    cfg = yaml.safe_load((repo_root / "privacy.yaml").read_text())
+    cfg.setdefault("detection", {})["auto_alias"] = True
+    p = tmp_path / "privacy.yaml"
+    p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    res = compile_repo(str(real_repo), config_path=str(p), out=str(tmp_path / "ghost"),
+                       mapping_path=str(tmp_path / "m.json"),
+                       audit_path=str(tmp_path / "a.jsonl"),
+                       candidates_path=str(tmp_path / "c.jsonl"))
+    minted = [eid for eid in res.entities if eid.startswith("disc_")]
+    assert minted, "auto_alias did not mint any discovered entity"
+    adv = (tmp_path / "ghost" / "src" / "integrations" / "adversary.js").read_text()
+    assert "Meridian Aero Systems" not in adv          # prose name aliased
+    assert "MERIDIAN_API_KEY" not in adv               # env var aliased
+    # the package specifier is KEPT verbatim — a renamed dep would not resolve
+    assert "require('@meridianaero/flight-sdk')" in adv
+    assert res.kept_specifiers
+    assert any(k["specifier"] == "@meridianaero/flight-sdk" for k in res.kept_specifiers)
+
+
+def test_import_specifier_kept_but_relative_specifier_still_rewritten(tmp_path):
+    """Package specifiers are kept; first-party (./ ../) specifiers still rewrite."""
+    from ghostc.compile import compile_repo
+
+    repo = tmp_path / "src"
+    repo.mkdir(parents=True)
+    (repo / "acme.js").write_text("module.exports = {};\n", encoding="utf-8")
+    (repo / "app.js").write_text(
+        "const sdk = require('@acmecorp/sdk');\n"
+        "const local = require('./acme');\n"
+        "import helper from '../src/acme';\n"
+        "const ACME_KEY = process.env.ACME_KEY;\n", encoding="utf-8")
+    cfg = {
+        "version": 1, "mapping_version": 1,
+        "levels": {"internal": {"transform": True, "approval": "auto"}},
+        "strategies": ["semantic_alias"], "defaults_by_kind": {}, "exclusions": [],
+        "entities": [{
+            "id": "vendor_acme", "real": "AcmeCorp", "kind": "vendor", "level": "internal",
+            "strategy": "semantic_alias", "ghost": "vendor-a",
+            "match": [{"kind": "identifier", "value": "acmecorp"},
+                      {"kind": "identifier", "value": "acme"}],
+        }],
+    }
+    import yaml as _yaml
+
+    p = tmp_path / "privacy.yaml"
+    p.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+    res = compile_repo(str(repo), config_path=str(p), out=str(tmp_path / "ghost"),
+                       mapping_path=str(tmp_path / "m.json"),
+                       audit_path=str(tmp_path / "a.jsonl"),
+                       candidates_path=str(tmp_path / "c.jsonl"), detect=False)
+    out = (tmp_path / "ghost" / "app.js").read_text()
+    assert "require('@acmecorp/sdk')" in out                 # package: kept verbatim
+    assert "require('./vendor-a')" in out                    # first-party: rewritten
+    assert "from '../src/vendor-a'" in out                   # first-party: rewritten
+    assert (tmp_path / "ghost" / "vendor-a.js").exists()     # + the target file renamed
+    assert "ACME_KEY" not in out and "VENDOR_A_KEY" in out   # env var: rewritten
+    assert [k["specifier"] for k in res.kept_specifiers] == ["@acmecorp/sdk"]
+
+
+def test_rewrite_imports_flag_forces_package_specifier_rewrite(tmp_path):
+    from ghostc.compile import compile_repo
+
+    repo = tmp_path / "src"
+    repo.mkdir(parents=True)
+    (repo / "app.js").write_text("const s = require('@acmecorp/sdk');\n", encoding="utf-8")
+    cfg = {
+        "version": 1, "mapping_version": 1,
+        "levels": {"internal": {"transform": True, "approval": "auto"}},
+        "strategies": ["semantic_alias"], "defaults_by_kind": {}, "exclusions": [],
+        "entities": [{
+            "id": "vendor_acme", "real": "AcmeCorp", "kind": "vendor", "level": "internal",
+            "strategy": "semantic_alias", "ghost": "vendor-a", "rewrite_imports": True,
+            "match": [{"kind": "identifier", "value": "acmecorp"}],
+        }],
+    }
+    import yaml as _yaml
+
+    p = tmp_path / "privacy.yaml"
+    p.write_text(_yaml.safe_dump(cfg), encoding="utf-8")
+    res = compile_repo(str(repo), config_path=str(p), out=str(tmp_path / "ghost"),
+                       mapping_path=str(tmp_path / "m.json"),
+                       audit_path=str(tmp_path / "a.jsonl"),
+                       candidates_path=str(tmp_path / "c.jsonl"), detect=False)
+    out = (tmp_path / "ghost" / "app.js").read_text()
+    assert "require('@vendor-a/sdk')" in out
+    assert res.kept_specifiers == []
+
+
+def test_auto_alias_blocks_on_restricted_discovery():
+    """A discovered restricted proposal must halt compile (human-approval gate)."""
+    from types import SimpleNamespace
+
+    from ghostc.compile import _augment_with_auto_candidates
+    from ghostc.detect.settings import detection_settings
+
+    fake = SimpleNamespace(candidates=[SimpleNamespace(
+        entity_id=None, action="auto", kind="client", level="restricted",
+        surface="AcmeAir", aliases=["acmeair"], occurrences=[], score=0.97)])
+    settings = detection_settings({"detection": {"auto_alias": True}})
+    _cfg, minted, blocked = _augment_with_auto_candidates(
+        {"entities": [], "mapping_version": 1}, fake, settings)
+    assert minted and blocked == [minted[0]["id"]]

@@ -65,7 +65,8 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 # 3. env
 python -m venv .venv && . .venv/bin/activate && pip install -e .
 
-# 4. pipeline  (all implemented except `discover`, still a stub)
+# 4. pipeline  (all 7 subcommands implemented)
+ghostc discover --repo workspace/real --config privacy.yaml   # score + propose sensitive entities
 ghostc compile  --repo workspace/real --config privacy.yaml --out workspace/ghost
 ghostc verify   --ghost workspace/ghost --mapping workspace/private/mapping.json
 ghostc apply-patch --ghost-diff <ghost-pr.diff> --mapping workspace/private/mapping.json --real workspace/real --apply
@@ -75,8 +76,10 @@ ghostc eval     --real workspace/real --config privacy.yaml   # -> workspace/eva
 
 **Current result** (`ghostc eval` on the fixture): keyword-redaction baseline leaves **28**
 residual real-entity occurrences in what an external agent would see; `ghostc compile` leaves
-**0**, and the ghost PR round-trips back to a real branch through `ghostc apply-patch`. Full
-evidence trail: `CHANGELOG.md` + `workspace/eval-report.md`.
+**0**, and the ghost PR round-trips back to a real branch through `ghostc apply-patch`.
+`ghostc discover` re-finds all 13 configured entities from code alone and proposes the two
+unconfigured ones seeded in `adversary.js` (Meridian, Contoso) with no OSS-library false
+positives. Full evidence trail: `CHANGELOG.md` + `workspace/eval-report.md`.
 
 ## What pre-existed vs. what we added (ground rule 02)
 

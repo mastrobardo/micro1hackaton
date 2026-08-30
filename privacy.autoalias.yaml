@@ -1,12 +1,18 @@
-# Privacy configuration — validated against schemas/privacy-config.schema.json
+# privacy.yaml + detection.auto_alias ON — copy of privacy.yaml, identical except
+# the `detection:` block below. Use it to make `ghostc compile` also neutralise the
+# entities `ghostc discover` proposes but that are NOT in the seed list (the
+# Meridian / Contoso layer in fixtures/inject/src/integrations/adversary.js):
 #
-# `entities` below are the SEED set: the synthetic sensitive entities injected into the
-# fixture by fixtures/apply.sh. Entities found by `ghostc discover` are appended with
-# source: discovered and (for `restricted`) require approved_by before use.
+#   ghostc compile --repo workspace/real --config privacy.autoalias.yaml
 #
-# Ghost aliases use a flat, type-prefixed scheme (vendor-a, service-a, region-a, ...).
-# The compiler renders per-context casings from the canonical kebab form:
-# service-a -> SERVICE_A (env), serviceA (identifier), service-a.example (host).
+# auto_threshold is lowered to 0.80 so Contoso (0.83) is caught too, not just
+# Meridian (0.99). A discovered *restricted* proposal still BLOCKS pending approval.
+# Keep the `entities:` list in sync with privacy.yaml if you edit the seeds.
+#
+# NOTE: `require('@meridianaero/flight-sdk')` and the like are KEPT verbatim (a
+# renamed package won't resolve in the ghost) — they show up under "import
+# specifiers kept" and in ghost-spec.md. Everything else about Meridian/Contoso
+# (env vars, identifiers, prose, base64) is aliased.
 
 version: 1
 mapping_version: 1
@@ -28,13 +34,10 @@ defaults_by_kind:
   secret: { strategy: remove, level: restricted }
   person: { strategy: synthetic_id, level: restricted }
 
-# Candidate-scoring thresholds (see ghostc/detect/). All optional — these are the
-# built-in defaults, shown for discoverability. `auto_alias: false` lets `compile`
-# neutralise entities that `discover` proposes but that are not listed below.
 detection:
-  auto_threshold: 0.90
+  auto_threshold: 0.80
   review_threshold: 0.45
-  auto_alias: false
+  auto_alias: true
   decode_pass: true
 
 exclusions:

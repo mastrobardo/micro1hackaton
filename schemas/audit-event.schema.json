@@ -12,16 +12,19 @@
     "event": {
       "enum": [
         "run.start", "run.end",
-        "discover.entity_proposed", "discover.entity_approved", "discover.entity_rejected",
-        "compile.file_scanned", "compile.entity_detected", "compile.transformed", "compile.mapping_created", "compile.mapping_reused",
+        "discover.candidate_scored", "discover.entity_proposed", "discover.entity_approved", "discover.entity_rejected",
+        "compile.file_scanned", "compile.entity_detected", "compile.transformed", "compile.candidate_review", "compile.import_specifier_kept", "compile.mapping_created", "compile.mapping_reused",
         "verify.scan", "verify.pass", "verify.block",
         "patch.parsed", "patch.entity_resolved", "patch.applied", "patch.rejected",
         "consistency.verdict",
+        "spec.compiled", "spec.rejected",
+        "agent.task_started", "agent.spec_handoff", "agent.ghost_pr_opened",
+        "agent.real_pr_opened", "agent.task_completed", "agent.metrics",
         "approval.requested", "approval.granted", "approval.denied",
         "policy.violation"
       ]
     },
-    "component": { "enum": ["orchestrator", "discovery", "compiler", "verifier", "reverse_compiler", "consistency", "eval"] },
+    "component": { "enum": ["orchestrator", "discovery", "compiler", "verifier", "reverse_compiler", "consistency", "eval", "spec_compiler", "client_agent", "consultancy_agent"] },
     "actor": { "type": "string", "description": "system | human:<id>" },
     "subject": {
       "type": "object",

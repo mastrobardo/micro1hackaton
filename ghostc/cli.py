@@ -1,7 +1,7 @@
 """ghostc command-line interface.
 
-Implemented today:  validate-config, compile, verify, baseline, eval
-Stubs (see PROGRESS.md):  discover, apply-patch
+Implemented:  validate-config, discover, compile, compile-spec, verify, baseline,
+              apply-patch, eval
 """
 from __future__ import annotations
 
@@ -9,11 +9,6 @@ import click
 
 from ghostc import __version__
 from ghostc.config import ConfigError, entities_needing_approval, load_config
-
-_STUB = (
-    "not yet implemented — this is the scaffold. "
-    "See PROGRESS.md for the build order and SESSION_TODO.md for what's next."
-)
 
 
 @click.group()
@@ -51,10 +46,34 @@ def validate_config(config_path: str) -> None:
 
 @main.command()
 @click.option("--repo", required=True, type=click.Path())
-@click.option("--config", "config_path", default="privacy.yaml", type=click.Path())
-def discover(repo: str, config_path: str) -> None:
-    """Scan REPO, propose sensitive entities, reuse existing mapping identities."""
-    raise SystemExit(f"ghostc discover: {_STUB}")
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--out", "out_path", default="workspace/private/candidates.jsonl",
+              show_default=True, type=click.Path(),
+              help="Ranked candidates, one JSON object per line. Boundary-internal.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--threshold", type=float, default=None,
+              help="Override detection.review_threshold for this run.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the candidate list as JSON.")
+def discover(repo: str, config_path: str, out_path: str, audit_path: str,
+             threshold: float | None, as_json: bool) -> None:
+    """Scan REPO, score sensitive-entity candidates, propose the unconfigured ones."""
+    from ghostc.discover import discover_repo
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = discover_repo(repo, config_path=config_path, out=out_path,
+                           audit_path=audit_path, threshold=threshold)
+    if as_json:
+        import json
+
+        click.echo(json.dumps([c.to_dict() for c in result.scan.candidates], indent=2))
+    else:
+        click.echo(result.summary())
 
 
 @main.command()
@@ -71,9 +90,15 @@ def discover(repo: str, config_path: str) -> None:
               help="Mapping store — boundary-internal, holds real values. Never crosses.")
 @click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
               show_default=True, type=click.Path(), help="Audit log — boundary-internal.")
+@click.option("--candidates", "candidates_path",
+              default="workspace/private/candidates.jsonl", show_default=True,
+              type=click.Path(),
+              help="Detection candidates + review queue — boundary-internal.")
+@click.option("--no-detect", is_flag=True,
+              help="Skip the candidate-scoring pass (matchers only, no review queue).")
 @click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
 def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path: str,
-            audit_path: str, dry_run: bool) -> None:
+            audit_path: str, candidates_path: str, no_detect: bool, dry_run: bool) -> None:
     """Compile REPO into a privacy-safe ghost repo + ghost spec."""
     from ghostc.compile import compile_repo
 
@@ -92,8 +117,56 @@ def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path:
 
     result = compile_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
                           mapping_path=mapping_path, audit_path=audit_path,
+                          candidates_path=candidates_path, detect=not no_detect,
                           dry_run=dry_run)
     click.echo(result.summary())
+
+
+@main.command("compile-spec")
+@click.option("--task", "task_path", required=True, type=click.Path(),
+              help="Real implementation task text: a file path, or '-' for stdin.")
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path(),
+              help="Substitution source — boundary-internal, never crosses.")
+@click.option("--out", "out_path", default="workspace/ghost-task.md", show_default=True,
+              type=click.Path(),
+              help="Sanitized TASK.md — this is what crosses to the consultancy side.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--json", "as_json", is_flag=True, help="Emit the ghost task as JSON.")
+def compile_spec(task_path: str, config_path: str, mapping_path: str, out_path: str,
+                 audit_path: str, as_json: bool) -> None:
+    """Compile a real implementation task into a sanitized ghost TASK.md. Fail closed."""
+    from pathlib import Path
+
+    from ghostc.agents.spec import Rejection
+    from ghostc.agents.spec import compile_spec as _compile_spec
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    text = (click.get_text_stream("stdin").read() if task_path == "-"
+            else Path(task_path).read_text(encoding="utf-8"))
+
+    try:
+        spec = _compile_spec(text, config_path=config_path, mapping_path=mapping_path,
+                             audit_path=audit_path, out_path=out_path)
+    except Rejection as rej:
+        raise SystemExit(f"REJECTED (fail closed)\n  {rej}")
+
+    if as_json:
+        import json
+
+        click.echo(json.dumps(
+            {"operation_id": spec.operation_id, "ghost_task": spec.ghost_task,
+             "substitutions": [s.to_dict() for s in spec.substitutions]}, indent=2))
+    else:
+        click.echo(spec.summary())
+        click.echo(f"  -> {out_path}")
 
 
 @main.command()

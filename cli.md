@@ -1,11 +1,17 @@
 # ghostc CLI — manual test walkthrough
 
-Copy-paste commands to exercise everything that works today. Run from the repo root
-with the venv active. `discover` is the only remaining stub (see the last section).
+Copy-paste commands to exercise everything. Run from the repo root with the venv active.
+All 7 commands are implemented.
+
+**Automated:** `./scripts/e2e.sh` runs every section below in order (happy paths + the
+fail-closed cases) and checks each result — `KEEP_GOING=1` to not stop on the first
+mismatch, `SKIP_EVAL=1` to skip the slower eval step.
 
 ```bash
 cd /Users/davide.arcinotti/learn/hackaton
 python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
+# optional: real embeddings for the semantic detection signal (~2GB torch)
+# pip install -e ".[dev,semantic]"
 ghostc --version          # ghostc, version 0.1.0
 ghostc --help             # lists 7 commands
 ```
@@ -62,7 +68,7 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 ghostc compile --repo workspace/real --dry-run
 ```
 
-Expected: 84 files scanned, 7 changed, 3 renamed, 13 entities detected
+Expected: 85 files scanned, 8 changed, 3 renamed, 13 entities detected
 (`vendor_aerofeed` is absent by design — it is the target of the hard eval case).
 
 ---
@@ -268,10 +274,60 @@ ghostc compile --repo workspace/real --config /tmp/pending.yaml   # -> BLOCKED .
 
 ---
 
-## 11. Stub (not implemented yet)
+## 11. Discover — candidate scoring / entity proposal
 
-`discover` exits non-zero with a pointer to `PROGRESS.md`:
+Scans the real repo, scores every sensitive-entity candidate, proposes the unconfigured ones.
+Writes `workspace/private/candidates.jsonl` + `discover.*` audit events. Never edits the repo.
 
 ```bash
 ghostc discover --repo workspace/real
 ```
+
+Expected (abridged):
+
+```
+files scanned:  85
+candidates:     15  (auto 9  review 6  ignore 0)
+semantic:       n-gram fallback          # or "sentence-transformers" with the [semantic] extra
+
+Datadog                    →  1.00  exact + package / import + identifier token [auto]   vendor_datadog
+SkyRoute Data Ltd          →  1.00  exact + package / import + identifier token [auto]   vendor_skyroute
+Northwind Airlines         →  1.00  exact + package / import + identifier token [review] client_northwind   # restricted → review
+Meridian Aero Systems      →  0.99  declared alias + identifier token + structural shape [review] (new)
+gw.prod.contoso.internal   →  0.83  identifier token + structural shape                  [review] (new)
+
+proposed entities (not in privacy.yaml): 2
+  Meridian Aero Systems       0.99  vendor/internal            x93  [review]
+  gw.prod.contoso.internal    0.83  infra_identifier/confidential  x8   [review]
+
+recall (configured entities re-found from code): 100%
+```
+
+`Meridian` and `Contoso` live in `src/integrations/adversary.js` and are **not** in
+`privacy.yaml` — `discover` finds them from code alone (alias list, `@meridianaero/flight-sdk`,
+env-var laundering, `const flightProvider = client` chains, base64). It does **not** propose
+`helmet` / `moment` / `swagger-jsdoc` / other OSS libraries.
+
+### Threshold-driven compile
+
+`compile` runs the same scan. Default (`detection.auto_alias: false` in `privacy.yaml`): the
+ghost tree is byte-identical to the matcher-only output; `review` candidates go to
+`workspace/private/candidates.jsonl` + `compile.candidate_review` audit. Turn it on to
+neutralise the proposals too:
+
+```bash
+sed 's/auto_alias: false/auto_alias: true/' privacy.yaml > /tmp/aa.yaml
+ghostc compile --repo workspace/real --config /tmp/aa.yaml --dry-run
+# -> entities: 14  (adds disc_meridian_aero_systems -> vendor-e, x87 occurrences)
+# a discovered *restricted* proposal would BLOCK instead, pending approved_by
+```
+
+Tune `detection.auto_threshold` / `review_threshold` in the `detection:` block, or pass
+`ghostc discover --threshold 0.3` to widen the review net for one run.
+
+**Import specifiers are kept, not aliased.** `require('@meridianaero/flight-sdk')` stays
+verbatim (a renamed package would not resolve in the ghost) — `compile` reports it under
+`import specifiers kept: N`, lists it in `workspace/ghost-spec.md` → "Dependency names left
+un-aliased", and emits `compile.import_specifier_kept`. First-party specifiers (`./x`) still
+rewrite. If a *seed* entity name is in a specifier, `compile` warns that `verify` will BLOCK —
+set `rewrite_imports: true` on that entity, or exclude the file.

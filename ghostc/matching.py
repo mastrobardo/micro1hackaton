@@ -41,6 +41,7 @@ class Hit:
     level: str
     remove: bool = False
     line: int = 0
+    kept: bool = False        # matched but deliberately NOT rewritten (import specifier)
 
     @property
     def rank(self) -> tuple:
@@ -60,6 +61,7 @@ class EntityMatcher:
     stems: list[list[str]] = field(default_factory=list)
     literals: list[str] = field(default_factory=list)
     regexes: list[re.Pattern] = field(default_factory=list)
+    rewrite_imports: bool = False     # rewrite this entity even inside package specifiers
 
     @property
     def use_segments(self) -> bool:
@@ -128,18 +130,41 @@ def build_matchers(config: dict) -> list[EntityMatcher]:
             entity_id=e["id"], kind=e["kind"], level=e["level"], strategy=e["strategy"],
             ghost=ghost, remove=remove, ghost_segments=ghost_segments,
             stems=_dedup(stems), literals=_dedup_longest_first(literals), regexes=regexes,
+            rewrite_imports=bool(e.get("rewrite_imports", False)),
         ))
     return out
+
+
+_FIRST_PARTY_PREFIXES = (".", "/", "~")
+
+
+def _is_first_party_specifier(spec: str) -> bool:
+    """A specifier the ghost tree resolves itself — safe to rewrite consistently.
+
+    Relative / absolute / ``~`` alias paths point inside the tree; everything else
+    (bare package, ``@scope/pkg``, ``node:`` builtin) resolves from outside it.
+    """
+    s = spec.strip().strip("'\"")
+    return s.startswith(_FIRST_PARTY_PREFIXES)
 
 
 def transform_text(text: str, node_kind: str, matchers: list[EntityMatcher],
                    base: int = 0) -> tuple[str, list[Hit]]:
     """Apply every matcher to one node's *text*. Returns (new_text, picked hits).
 
-    node_kind: "identifier" | "string" | "comment" | "filename".
+    node_kind: "identifier" | "string" | "comment" | "filename" | "import_specifier".
+
+    For ``import_specifier`` a **package** specifier (bare / scoped, e.g.
+    ``@vendor/sdk``) is matched but NOT rewritten — a renamed dependency does not
+    resolve in the ghost environment. Such hits come back with ``kept=True`` and
+    leave the text unchanged. A first-party specifier (``./x``) rewrites normally,
+    as does any entity with ``rewrite_imports: true``.
     """
+    keep_package = node_kind == "import_specifier" and not _is_first_party_specifier(text)
+    scan_kind = "string" if node_kind == "import_specifier" else node_kind
+
     candidates: list[Hit] = []
-    if node_kind == "identifier":
+    if scan_kind == "identifier":
         for m in matchers:
             candidates.extend(m.identifier_hits(text, base))
     else:
@@ -157,8 +182,17 @@ def transform_text(text: str, node_kind: str, matchers: list[EntityMatcher],
         taken.append((h.start, h.end))
         picked.append(h)
 
+    if keep_package:
+        by_id = {m.entity_id: m for m in matchers}
+        for h in picked:
+            if not by_id.get(h.entity_id, EntityMatcher(
+                    h.entity_id, "", "", "", "", False, [])).rewrite_imports:
+                h.kept = True
+                h.real = text          # report the whole specifier, not the inner token
+
+    to_apply = [h for h in picked if not h.kept]
     buf = text
-    for h in sorted(picked, key=lambda h: h.start, reverse=True):
+    for h in sorted(to_apply, key=lambda h: h.start, reverse=True):
         s, e = h.start - base, h.end - base
         buf = buf[:s] + h.ghost + buf[e:]
     picked.sort(key=lambda h: h.start)

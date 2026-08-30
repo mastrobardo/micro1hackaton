@@ -47,6 +47,34 @@ scanned, 7 changed, 3 renamed, 13 entities, **0 leaks**, deterministic, ghost JS
   `workspace/private/mapping.json` (13 frozen entries + `{file,line}` occurrences),
   `workspace/private/audit.jsonl` (`real_sha256` only).
 
+## Threshold-driven (2026-08-30, Iteration 6)
+
+`compile_repo` now runs the `ghostc discover` scan (`detect=True` default). With
+`detection.auto_alias: false` (default) the ghost tree is **byte-identical** to the
+matcher-only output — the scan only writes `workspace/private/candidates.jsonl` +
+`compile.candidate_review` audit events for the human review queue. With `auto_alias: true`,
+each unconfigured `auto` candidate becomes a synthetic `source: discovered` entity (minted
+flat alias) and is transformed; a `restricted` proposal raises `BLOCKED`. Full detail:
+[[detection-scoring]].
+
+## Import specifiers kept, not aliased (2026-08-30)
+
+`compile` leaves **package** import specifiers verbatim — `require('@x/sdk')` /
+`import … from '@x/sdk'` / `jest.mock('@x/…')` args (via a tree-sitter pre-pass,
+`ghostc/parsers/treesitter._spec_string_ranges`) **and** `package.json`
+`dependencies`/`devDependencies`/`peerDependencies`/`optionalDependencies`/`resolutions`
+KEYS (`ghostc/parsers/scoped._compile_package_json`). Rationale: a renamed dependency
+resolves nowhere → the ghost fails `yarn install` / `MODULE_NOT_FOUND`; any resolvable
+rewrite re-leaks the real name. First-party specifiers (`./`, `../`, `~`) still rewrite
+(the target file is renamed too → consistent). `node:` builtins are kept.
+`matching.transform_text(text, "import_specifier", …)` returns the matching `Hit`s with
+`kept=True` and unchanged text. `compile` routes them to
+`CompileResult.kept_specifiers` + `compile.import_specifier_kept` audit + a
+"Dependency names left un-aliased" section in `ghost-spec.md`; a *seed* entity in a
+specifier → stderr WARNING that `verify` will BLOCK. Per-entity `rewrite_imports: true`
+(schema) forces the old rewrite-everywhere behaviour. Not yet covered: dynamically-built
+specifiers and inline dep-map objects inside `.js` (`adversary.js` `vendorDependencies`).
+
 ## Known limits
 
 Ghost prose casing varies (`client-a` / `Client A` / `ClientA`) — reversible, cosmetic.

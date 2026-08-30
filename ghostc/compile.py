@@ -6,7 +6,10 @@ emits a ghost spec, and one audit event per step.
 """
 from __future__ import annotations
 
+import copy
 import fnmatch
+import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +20,15 @@ from ghostc.mapping import MappingStore
 from ghostc.matching import build_matchers, transform_text
 from ghostc.parsers import scoped
 from ghostc.parsers import treesitter as ts
+
+_KIND_STRATEGY = {
+    "secret": "remove", "client": "synthetic_id", "person": "synthetic_id",
+    "infra_identifier": "synthetic_id", "domain": "synthetic_endpoint",
+}
+_KIND_PREFIX = {
+    "vendor": "vendor", "client": "client", "internal_service": "service",
+    "infra_identifier": "id", "domain": "host", "secret": "secret", "person": "person",
+}
 
 _ALWAYS_SKIP_DIRS = {".git"}
 
@@ -43,6 +55,7 @@ class CompileResult:
     files_renamed: int = 0
     hits: int = 0
     entities: dict[str, EntityRoll] = field(default_factory=dict)
+    kept_specifiers: list[dict] = field(default_factory=list)  # {file,line,specifier,entity_id,source}
 
     def summary(self) -> str:
         lines = [
@@ -53,6 +66,9 @@ class CompileResult:
             f"files renamed:  {self.files_renamed}",
             f"entities:       {len(self.entities)}   occurrences: {self.hits}",
         ]
+        if self.kept_specifiers:
+            lines.append(f"import specifiers kept (not aliased — reveal a dependency): "
+                         f"{len(self.kept_specifiers)}")
         for r in sorted(self.entities.values(), key=lambda r: r.entity_id):
             tag = "reuse" if r.reused else "new  "
             lines.append(f"  [{tag}] {r.entity_id:24} {r.level:12} {r.ghost or '<removed>':16} "
@@ -96,14 +112,32 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                  mapping_path: str = "workspace/private/mapping.json",
                  audit_path: str = "workspace/private/audit.jsonl",
                  spec_path: str = "workspace/ghost-spec.md",
+                 candidates_path: str = "workspace/private/candidates.jsonl",
+                 detect: bool = True,
                  dry_run: bool = False) -> CompileResult:
     repo_p = Path(repo)
     if not repo_p.is_dir():
         raise SystemExit(f"repo not found: {repo}")
     out_p = Path(out)
-    _assert_outside_ghost(out_p, mapping=mapping_path, audit=audit_path, spec=spec_path)
+    _assert_outside_ghost(out_p, mapping=mapping_path, audit=audit_path, spec=spec_path,
+                          candidates=candidates_path)
     cfg = load_config(config_path)
     exclusions = cfg.get("exclusions", [])
+
+    scan = None
+    if detect:
+        from ghostc.detect.scan import scan_repo
+        from ghostc.detect.settings import detection_settings
+
+        det = detection_settings(cfg)
+        scan = scan_repo(str(repo_p), cfg=cfg, settings=det)
+        cfg, minted, blocked = _augment_with_auto_candidates(cfg, scan, det)
+        if blocked:
+            raise SystemExit(
+                "BLOCKED: ghostc discover auto-proposed restricted entity(ies) "
+                f"{', '.join(blocked)} (detection.auto_alias). Add them to "
+                "privacy.yaml with `approved_by:` before compiling.")
+
     matchers = build_matchers(cfg)
     ent_meta = {e["id"]: e for e in cfg.get("entities", [])}
 
@@ -118,6 +152,21 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
 
     audit.emit("run.start", "compiler", details={"repo": str(repo_p), "out": str(out_p),
                                                  "config": config_path, "dry_run": dry_run})
+
+    if scan is not None:
+        if not dry_run:
+            _write_candidates(Path(candidates_path), scan)
+        for c in scan.candidates:
+            if c.action != "review":
+                continue
+            subject = {"real_sha256": hash_real(c.surface)}
+            if c.entity_id:
+                subject["entity_id"] = c.entity_id
+            audit.emit("compile.candidate_review", "compiler", level=c.level,
+                       subject=subject, decision="review",
+                       details={"score": c.score, "evidence": c.evidence,
+                                "configured": c.entity_id is not None,
+                                "occurrences": len(c.occurrences)})
 
     if not dry_run:
         if out_p.exists():
@@ -144,7 +193,7 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
             if lang:
                 new_text, file_hits = ts.compile_source(text, matchers, lang)
             elif scoped.handles(rel):
-                new_text, file_hits = scoped.compile_source(text, matchers)
+                new_text, file_hits = scoped.compile_source(text, matchers, rel)
             else:
                 new_text = text
 
@@ -154,8 +203,17 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
             result.files_renamed += 1
 
         for h in (*file_hits, *path_hits):
-            roll = result.entities.get(h.entity_id)
             meta = ent_meta[h.entity_id]
+            if getattr(h, "kept", False):
+                rec = {"file": new_rel, "line": h.line or 1, "specifier": h.real,
+                       "entity_id": h.entity_id, "source": meta.get("source", "seed")}
+                result.kept_specifiers.append(rec)
+                audit.emit("compile.import_specifier_kept", "compiler", level=meta["level"],
+                           subject={"entity_id": h.entity_id, "file": new_rel,
+                                    "line": h.line or 1},
+                           details={"source": rec["source"]})
+                continue
+            roll = result.entities.get(h.entity_id)
             if roll is None:
                 roll = EntityRoll(h.entity_id, meta["kind"], meta["level"],
                                   meta["strategy"], meta.get("ghost", ""), meta["real"])
@@ -201,10 +259,20 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                                 "mapping_version": store.data["mapping_version"]})
         store.save()
 
+    seed_kept = sorted({k["specifier"] for k in result.kept_specifiers
+                        if k["source"] == "seed"})
+    if seed_kept:
+        import sys
+        print("WARNING: kept import specifier(s) contain a SEED entity name and were "
+              "NOT aliased (a renamed dependency does not resolve in the ghost): "
+              + ", ".join(seed_kept)
+              + "\n  `ghostc verify` will BLOCK this ghost. Set `rewrite_imports: true` "
+              "on the entity, or add the file to `exclusions`.", file=sys.stderr)
+
     if not dry_run:
         _write_ghost_spec(Path(spec_path), result, op)
         _assert_ghost_tree_is_clean(out_p, mapping=mapping_path, audit=audit_path,
-                                    spec=spec_path)
+                                    spec=spec_path, candidates=candidates_path)
         _git_baseline(out_p)
 
     audit.emit("run.end", "compiler",
@@ -213,6 +281,76 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                         "files_renamed": result.files_renamed,
                         "entities": len(result.entities), "occurrences": result.hits})
     return result
+
+
+_TOKENISH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@-]*$")
+
+
+def _write_candidates(path: Path, scan) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        for c in scan.candidates:
+            fh.write(json.dumps(c.to_dict(), sort_keys=True) + "\n")
+
+
+def _next_alias(taken: set[str], prefix: str) -> str:
+    for i in range(26):
+        cand = f"{prefix}-{chr(ord('a') + i)}"
+        if cand not in taken:
+            return cand
+    n = 1
+    while f"{prefix}-{n}" in taken:
+        n += 1
+    return f"{prefix}-{n}"
+
+
+def _augment_with_auto_candidates(cfg: dict, scan, settings
+                                  ) -> tuple[dict, list[dict], list[str]]:
+    """With ``detection.auto_alias`` on, turn every unconfigured ``auto`` candidate
+    into a synthetic ``source: discovered`` entity so the normal matcher pipeline
+    neutralises it. Restricted proposals are reported as *blocked* (human gate)."""
+    if not settings.auto_alias:
+        return cfg, [], []
+    cfg = copy.deepcopy(cfg)
+    taken = {e.get("ghost", "") for e in cfg.get("entities", [])}
+    ids = {e["id"] for e in cfg.get("entities", [])}
+    minted: list[dict] = []
+    blocked: list[str] = []
+
+    for c in scan.candidates:
+        if c.entity_id is not None or c.action != "auto":
+            continue
+        kind = c.kind or "vendor"
+        strategy = _KIND_STRATEGY.get(kind, "semantic_alias")
+        ghost = "" if strategy == "remove" else _next_alias(taken, _KIND_PREFIX.get(kind, "vendor"))
+        taken.add(ghost)
+        base = "disc_" + re.sub(r"[^a-z0-9]+", "_", c.surface.lower()).strip("_")[:28]
+        eid = base
+        n = 2
+        while eid in ids:
+            eid = f"{base}_{n}"
+            n += 1
+        ids.add(eid)
+
+        match = []
+        for a in dict.fromkeys([*c.aliases, *[o.surface for o in c.occurrences]]):
+            if a == c.surface or not a:
+                continue
+            m_kind = "identifier" if _TOKENISH.match(a) and " " not in a else "literal"
+            match.append({"kind": m_kind, "value": a})
+        ent = {
+            "id": eid, "real": c.surface, "kind": kind,
+            "level": c.level or "confidential", "strategy": strategy,
+            "ghost": ghost, "source": "discovered",
+            "note": f"auto-proposed by ghostc discover (score {c.score:.2f})",
+        }
+        if match:
+            ent["match"] = match[:24]
+        cfg["entities"].append(ent)
+        minted.append(ent)
+        if ent["level"] == "restricted" and not ent.get("approved_by"):
+            blocked.append(eid)
+    return cfg, minted, blocked
 
 
 def _dedup_occ(occ: list[dict]) -> list[dict]:
@@ -262,13 +400,31 @@ def _write_ghost_spec(spec_p: Path, result: CompileResult, op: str) -> None:
     spec = f"""# Ghost spec
 
 Generated by `ghostc compile` (operation `{op}`). Safe to share with the external
-coding agent. Contains **no real values** — only the aliases it will see.
+coding agent. Reveals **no `real → ghost` mapping** — only the aliases it will see
+(plus, if any, the un-aliased dependency names already present in the ghost source).
 
 | entity | kind | level | ghost alias | occurrences |
 |--------|------|-------|-------------|-------------|
 {rows}
 
 Files scanned: {result.files_scanned} · changed: {result.files_changed} · renamed: {result.files_renamed}
+"""
+    if result.kept_specifiers:
+        by_spec: dict[str, int] = {}
+        for k in result.kept_specifiers:
+            by_spec[k["specifier"]] = by_spec.get(k["specifier"], 0) + 1
+        rows2 = "\n".join(f"| `{s}` | {n} |" for s, n in sorted(by_spec.items()))
+        spec += f"""
+## Dependency names left un-aliased
+
+These `import` / `require` specifiers matched a sensitive entity but were **kept**
+verbatim — a renamed package does not resolve in the ghost environment. They reveal
+a third-party dependency relationship; a human reviewer decides whether that is
+acceptable for this ghost.
+
+| specifier | occurrences |
+|-----------|-------------|
+{rows2}
 """
     spec_p.parent.mkdir(parents=True, exist_ok=True)
     spec_p.write_text(spec, encoding="utf-8")

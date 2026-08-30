@@ -9,10 +9,15 @@ dependencies = [
     "jsonschema>=4.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.9",
+    "rapidfuzz>=3.6",
+    "networkx>=3.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Optional: real sentence embeddings for the semantic detection signal. Absent, the
+# signal falls back to a stdlib char-n-gram cosine (see ghostc/detect/semantic.py).
+semantic = ["sentence-transformers>=3"]
 
 [project.scripts]
 ghostc = "ghostc.cli:main"
@@ -26,4 +31,4 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools]
-packages = ["ghostc", "ghostc.agents", "ghostc.parsers"]
+packages = ["ghostc", "ghostc.agents", "ghostc.detect", "ghostc.parsers"]

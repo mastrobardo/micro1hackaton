@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Run baseline (sed redaction) vs solution over the eval cases; emit the metric table.
-# [STUB] until `ghostc eval` lands — see PROGRESS.md.
+# `ghostc eval` is implemented — this wrapper just runs it on the built fixture.
+# Full walkthrough: scripts/e2e.sh · manual steps + expected output: cli.md §7.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "eval harness not implemented yet."
-echo "planned: python -m ghostc eval --cases eval/cases --config privacy.yaml"
-echo "  -> workspace/eval-report.md  (leak count, task pass rate, approvals, time, cost)"
-echo "  -> derived from workspace/audit.jsonl"
+[ -d workspace/real ] || ./fixtures/apply.sh
+exec python -m ghostc eval --real workspace/real --config privacy.yaml "$@"

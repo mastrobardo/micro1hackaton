@@ -70,6 +70,7 @@ def compiled(tmp_path_factory, real_repo, privacy_yaml) -> SimpleNamespace:
         spec_path=str(spec),
         mapping_path=str(private / "mapping.json"),
         audit_path=str(private / "audit.jsonl"),
+        candidates_path=str(private / "candidates.jsonl"),
     )
     return SimpleNamespace(
         result=res, root=out, ghost=ghost, spec=spec,

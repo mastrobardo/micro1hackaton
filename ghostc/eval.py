@@ -100,7 +100,7 @@ def _residual_scan(tree: Path, config_path: str) -> tuple[int, dict[str, int]]:
         res = compile_repo(str(tree), config_path=str(config_path),
                            out=str(t / "ghost"), spec_path=str(t / "s.md"),
                            mapping_path=str(t / "m.json"), audit_path=str(t / "a.jsonl"),
-                           dry_run=True)
+                           detect=False, dry_run=True)
     by = {eid: len(r.occurrences) for eid, r in res.entities.items()}
     return res.hits, by
 
@@ -154,7 +154,7 @@ def run_eval(real: str, config_path: str = "privacy.yaml",
     compile_repo(str(real_p), config_path=str(config_path), out=str(compile_p),
                  spec_path=str(compile_p.parent / "ghost-spec.md"),
                  mapping_path=str(compile_p.parent / "private" / "mapping.json"),
-                 audit_path=audit_path)
+                 audit_path=audit_path, detect=False)
 
     real_residual_total, _ = _residual_scan(real_p, config_path)
     real_strict_total, _ = _strict_scan(real_p, seeds)

@@ -1,0 +1,29 @@
+{
+  "_comment": "Expected `ghostc discover` result on workspace/real (base fixture + injected layer incl. src/integrations/adversary.js). Recall = configured entities re-found from code alone (no privacy.yaml hints beyond what scoring reads back). Proposals = unconfigured entities the scan must surface. Denylist = OSS libraries / placeholders it must never propose.",
+  "configured_recall_min": 1.0,
+  "configured_expected": [
+    "client_northwind",
+    "vendor_skyroute",
+    "vendor_datadog",
+    "vendor_sentry",
+    "svc_booking_core",
+    "svc_pricing",
+    "svc_fare_cache",
+    "infra_internal_host",
+    "infra_private_ip",
+    "infra_region",
+    "infra_aws_account",
+    "person_service_owner",
+    "secret_skyroute_key"
+  ],
+  "proposals_expected": {
+    "meridian": { "min_score": 0.8, "stems": ["meridian", "meridianaero", "mas", "mds"] },
+    "contoso": { "min_score": 0.6, "stems": ["contoso"] }
+  },
+  "precision_denylist": [
+    "helmet", "moment", "express", "mongoose", "passport", "jsonwebtoken",
+    "bcryptjs", "nodemailer", "winston", "joi", "supertest", "swagger-jsdoc",
+    "swagger-ui-express", "compression", "dotenv", "validator", "xss-clean",
+    "http-status", "cross-env", "eslint", "prettier", "jest", "faker"
+  ]
+}

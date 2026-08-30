@@ -105,3 +105,49 @@ def test_no_candidates_returns_text_unchanged(seed_matchers):
     text = "const users = getUsers();"
     assert apply(text, "identifier", seed_matchers) == text
     assert transform_text(text, "string", seed_matchers)[1] == []
+
+
+# -- import specifiers ---------------------------------------------------
+
+def _acme():
+    cfg = make_config([ent(id="v", real="AcmeCorp", level="internal", ghost="vendor-a",
+                           match=[{"kind": "identifier", "value": "acmecorp"},
+                                  {"kind": "identifier", "value": "acme"}])])
+    return build_matchers(cfg)
+
+
+def test_package_specifier_is_matched_but_kept():
+    m = _acme()
+    out, hits = transform_text("@acmecorp/sdk", "import_specifier", m)
+    assert out == "@acmecorp/sdk"                 # not rewritten
+    assert hits and all(h.kept for h in hits)
+    assert hits[0].real == "@acmecorp/sdk"        # reports the whole specifier
+
+
+def test_bare_package_specifier_is_kept():
+    out, hits = transform_text("acmecorp", "import_specifier", _acme())
+    assert out == "acmecorp" and hits and hits[0].kept
+
+
+def test_relative_specifier_is_rewritten():
+    out, hits = transform_text("./services/acme", "import_specifier", _acme())
+    assert out == "./services/vendor-a"
+    assert hits and not any(h.kept for h in hits)
+
+
+def test_node_builtin_specifier_is_kept():
+    out, hits = transform_text("node:acme", "import_specifier", _acme())
+    assert out == "node:acme" and hits and hits[0].kept
+
+
+def test_rewrite_imports_flag_overrides_keep():
+    cfg = make_config([ent(id="v", real="AcmeCorp", level="internal", ghost="vendor-a",
+                           rewrite_imports=True,
+                           match=[{"kind": "identifier", "value": "acmecorp"}])])
+    out, hits = transform_text("@acmecorp/sdk", "import_specifier", build_matchers(cfg))
+    assert out == "@vendor-a/sdk" and not any(h.kept for h in hits)
+
+
+def test_import_specifier_kind_does_not_affect_plain_strings():
+    m = _acme()
+    assert transform_text("acmecorp", "string", m)[0] == "vendor-a"

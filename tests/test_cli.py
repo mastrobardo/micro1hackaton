@@ -7,7 +7,6 @@ from click.testing import CliRunner
 from ghostc.cli import main
 
 RUNNER = CliRunner()
-STUBS = ["discover"]
 
 
 def test_help_lists_every_command():
@@ -47,12 +46,14 @@ def test_validate_config_rejects_broken_file(tmp_path):
     assert "INVALID" in res.output
 
 
-@pytest.mark.parametrize("cmd", STUBS)
-def test_stub_commands_exit_nonzero_with_pointer(cmd):
-    args = {"discover": ["--repo", "."]}[cmd]
-    res = RUNNER.invoke(main, [cmd, *args])
-    assert res.exit_code != 0
-    assert "PROGRESS.md" in res.output
+def test_discover_is_not_a_stub(real_repo, tmp_path, repo_root):
+    res = RUNNER.invoke(main, [
+        "discover", "--repo", str(real_repo), "--config", str(repo_root / "privacy.yaml"),
+        "--out", str(tmp_path / "candidates.jsonl"), "--audit", str(tmp_path / "a.jsonl"),
+    ])
+    assert res.exit_code == 0
+    assert "candidates:" in res.output and "proposed entities" in res.output
+    assert (tmp_path / "candidates.jsonl").exists()
 
 
 def test_baseline_is_not_a_stub(real_repo, tmp_path, repo_root):

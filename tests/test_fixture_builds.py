@@ -10,10 +10,16 @@ import subprocess
 
 import pytest
 
+# adversary.js is the detection/scoring adversarial corpus (deliberate unused vars,
+# obfuscation, split values). It is exercised by ghostc discover / scan, not by the
+# build gate — it is not meant to be lint-clean application code.
+_BUILD_GATE_SKIP = {"adversary.js"}
+
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
 def test_injected_javascript_parses(real_repo):
-    js_files = sorted((real_repo / "src" / "integrations").glob("*.js"))
+    js_files = sorted(p for p in (real_repo / "src" / "integrations").glob("*.js")
+                      if p.name not in _BUILD_GATE_SKIP)
     assert js_files
     for js in js_files:
         r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True)
@@ -36,6 +42,9 @@ def test_injected_terraform_validates(real_repo, tmp_path):
 def test_lint_injected_sources_if_deps_present(real_repo):
     if not (real_repo / "node_modules").is_dir():
         pytest.skip("node_modules not installed in the fixture")
-    r = subprocess.run(["yarn", "lint", "src/integrations"], cwd=real_repo,
+    targets = [f"src/integrations/{p.name}"
+               for p in sorted((real_repo / "src" / "integrations").glob("*.js"))
+               if p.name not in _BUILD_GATE_SKIP]
+    r = subprocess.run(["yarn", "lint", *targets], cwd=real_repo,
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr

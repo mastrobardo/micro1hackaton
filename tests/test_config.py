@@ -59,6 +59,46 @@ def test_seed_config_has_no_pending_approvals(write_cfg):
     assert entities_needing_approval(load_config(write_cfg())) == []
 
 
+# -- detection: block ----------------------------------------------------------
+
+def test_detection_block_parses_with_defaults(write_cfg):
+    from ghostc.detect.settings import detection_settings
+
+    s = detection_settings(load_config(write_cfg()))
+    assert s.auto_threshold == 0.90 and s.review_threshold == 0.45
+    assert s.auto_alias is False and s.decode_pass is True
+
+
+def test_detection_overrides_are_applied(write_cfg):
+    from ghostc.detect.settings import detection_settings
+
+    def mutate(c):
+        c["detection"] = {"auto_threshold": 0.7, "auto_alias": True,
+                          "signal_weights": {"fuzzy": 0.3}}
+
+    s = detection_settings(load_config(write_cfg(mutate)))
+    assert s.auto_threshold == 0.7 and s.auto_alias is True
+    assert s.weight("fuzzy", 0.99) == 0.3
+
+
+def test_detection_rejects_unknown_key(write_cfg):
+    with pytest.raises(ConfigError, match="schema validation"):
+        load_config(write_cfg(lambda c: c.__setitem__("detection", {"nope": 1})))
+
+
+def test_detection_rejects_out_of_range_threshold(write_cfg):
+    with pytest.raises(ConfigError, match="schema validation"):
+        load_config(write_cfg(lambda c: c.__setitem__("detection",
+                                                      {"auto_threshold": 1.5})))
+
+
+def test_missing_detection_block_is_fine(write_cfg):
+    from ghostc.detect.settings import detection_settings
+
+    cfg = load_config(write_cfg(lambda c: c.pop("detection", None)))
+    assert detection_settings(cfg).auto_threshold == 0.90
+
+
 def test_discovered_restricted_entity_needs_approval(write_cfg):
     def add_discovered(c):
         c["entities"].append({

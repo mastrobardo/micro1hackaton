@@ -25,7 +25,7 @@ def test_writes_a_tree_and_a_sibling_spec(baseline_tree, tmp_path):
     out, res = baseline_tree
     assert out.is_dir()
     assert (tmp_path / "baseline-spec.md").exists()
-    assert res.files_scanned == 84
+    assert res.files_scanned == 85
     assert res.replacements > 0
 
 
