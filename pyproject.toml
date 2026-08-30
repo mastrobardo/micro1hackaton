@@ -21,5 +21,9 @@ ghostc = "ghostc.cli:main"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
 [tool.setuptools]
 packages = ["ghostc", "ghostc.agents", "ghostc.parsers"]

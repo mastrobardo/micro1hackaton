@@ -65,11 +65,11 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 # 3. env
 python -m venv .venv && . .venv/bin/activate && pip install -e .
 
-# 4. pipeline  (NOT YET IMPLEMENTED — stubs today)
+# 4. pipeline  (validate-config + compile implemented; discover/verify/apply-patch/eval are stubs)
 ghostc discover --repo workspace/real --config privacy.yaml
 ghostc compile  --repo workspace/real --config privacy.yaml --out workspace/ghost
-ghostc verify   --ghost workspace/ghost --mapping workspace/mapping.json
-ghostc apply-patch --ghost-diff <diff> --mapping workspace/mapping.json --real workspace/real
+ghostc verify   --ghost workspace/ghost --mapping workspace/private/mapping.json
+ghostc apply-patch --ghost-diff <diff> --mapping workspace/private/mapping.json --real workspace/real
 ghostc eval     --cases eval/cases --config privacy.yaml
 ```
 

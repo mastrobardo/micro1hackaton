@@ -32,6 +32,18 @@ def load_config(path: str | Path) -> dict:
         msg = "\n".join(f"  - {'/'.join(map(str, e.path)) or '<root>'}: {e.message}"
                         for e in errors)
         raise ConfigError(f"{path} failed schema validation:\n{msg}")
+
+    # entity ids must be unique — the schema can't express this, and a duplicate
+    # would make MappingStore.by_entity_id silently resolve to the first entry.
+    seen: set[str] = set()
+    dups: set[str] = set()
+    for e in cfg.get("entities", []):
+        eid = e["id"]
+        if eid in seen:
+            dups.add(eid)
+        seen.add(eid)
+    if dups:
+        raise ConfigError(f"{path}: duplicate entity id(s): {', '.join(sorted(dups))}")
     return cfg
 
 

@@ -37,8 +37,15 @@ scanned, 7 changed, 3 renamed, 13 entities, **0 leaks**, deterministic, ghost JS
   ("Never commit" working-agreement is about the submission repo, not this throwaway.)
 - `--dry-run` computes + prints, writes nothing. Blocks if a `restricted` entity from
   `discover`/`human` lacks `approved_by`.
-- Artifacts: `workspace/ghost/`, `ghost-spec.md` (no real values), `mapping.json` (13 frozen
-  entries + `{file,line}` occurrences), `audit.jsonl` (`real_sha256` only).
+- **Boundary layout** (2026-08-30): `workspace/ghost/` + sibling `workspace/ghost-spec.md`
+  cross the boundary; `workspace/private/{mapping.json,audit.jsonl}` never cross. CLI flags
+  `--out` / `--spec` / `--mapping` / `--audit`. `compile_repo` raises if spec/mapping/audit
+  resolve inside `--out` (`_assert_outside_ghost`) and re-scans the ghost tree for stray
+  metadata before the git baseline (`_assert_ghost_tree_is_clean`). The ghost tree mirrors
+  the real repo and nothing else.
+- Artifacts: `workspace/ghost/`, `workspace/ghost-spec.md` (no real values),
+  `workspace/private/mapping.json` (13 frozen entries + `{file,line}` occurrences),
+  `workspace/private/audit.jsonl` (`real_sha256` only).
 
 ## Known limits
 

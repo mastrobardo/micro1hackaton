@@ -1,0 +1,21 @@
+{
+  "_comment": "Leak-metric baseline. Regenerate with `python -m tests.gen_groundtruth`.",
+  "absent_by_design": [
+    "vendor_aerofeed"
+  ],
+  "occurrences": {
+    "client_northwind": 14,
+    "infra_aws_account": 3,
+    "infra_internal_host": 4,
+    "infra_private_ip": 2,
+    "infra_region": 3,
+    "person_service_owner": 2,
+    "secret_skyroute_key": 3,
+    "svc_booking_core": 5,
+    "svc_fare_cache": 5,
+    "svc_pricing": 5,
+    "vendor_datadog": 5,
+    "vendor_sentry": 2,
+    "vendor_skyroute": 13
+  }
+}

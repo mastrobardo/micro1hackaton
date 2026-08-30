@@ -1,8 +1,8 @@
 # ghostc CLI — manual test walkthrough
 
 Copy-paste commands to exercise everything that works today. Run from the repo root
-with the venv active. `discover` / `verify` / `apply-patch` / `eval` are still stubs
-(see the last section).
+with the venv active. `discover` / `apply-patch` / `eval` are still stubs (see the last
+section).
 
 ```bash
 cd /Users/davide.arcinotti/learn/hackaton
@@ -76,12 +76,15 @@ ghostc compile --repo workspace/real
 
 Produces:
 
-| Path | What |
-|---|---|
-| `workspace/ghost/` | the ghost repo (fresh `git init` + one baseline commit) |
-| `workspace/ghost-spec.md` | entity → alias table, **no real values** — safe to share |
-| `workspace/mapping.json` | 13 frozen `real ↔ ghost` entries + occurrences (**never share**) |
-| `workspace/audit.jsonl` | one event per step (`real_sha256` only, no cleartext) |
+| Path | Boundary | What |
+|---|---|---|
+| `workspace/ghost/` | **crosses** | the ghost repo (fresh `git init` + one baseline commit) — mirrors the real tree and nothing else |
+| `workspace/ghost-spec.md` | crosses (with the ghost) | entity → alias table, **no real values** — safe to share. Kept a sibling of the ghost, never inside it. |
+| `workspace/private/mapping.json` | **never crosses** | 13 frozen `real ↔ ghost` entries + occurrences (holds cleartext real values) |
+| `workspace/private/audit.jsonl` | never crosses | one event per step (`real_sha256` only, no cleartext) |
+
+`compile` refuses to run if `--spec` / `--mapping` / `--audit` resolve inside `--out`, and
+re-checks the ghost tree for stray metadata before the baseline commit.
 
 Inspect:
 
@@ -90,32 +93,46 @@ cat workspace/ghost-spec.md
 cat workspace/ghost/src/integrations/vendorAClient.js     # renamed from skyRouteClient.js
 git -C workspace/ghost log --oneline                      # "ghost baseline (ghostc compile)"
 
-python -c "import json; d=json.load(open('workspace/mapping.json')); \
+python -c "import json; d=json.load(open('workspace/private/mapping.json')); \
 print(len(d['entries']), 'entries'); \
 [print(f\"  {e['entity_id']:24} {e['level']:12} -> {e['ghost'] or '<removed>'}\") for e in d['entries']]"
 
 python -c "import json,collections; \
-c=collections.Counter(json.loads(l)['event'] for l in open('workspace/audit.jsonl')); \
+c=collections.Counter(json.loads(l)['event'] for l in open('workspace/private/audit.jsonl')); \
 [print(f'  {k}: {v}') for k,v in sorted(c.items())]"
 ```
 
 ---
 
-## 5. Leak scan (the primary metric — must be 0)
-
-Every real sensitive value should occur **zero times** in the ghost:
+## 5. Verify (the fail-closed gate — primary metric is 0 leaks)
 
 ```bash
-for v in Northwind SkyRoute skyroute Datadog datadoghq Sentry \
-         booking-core pricing-svc fare-cache northwind-internal \
-         10.20.4.7 nwa-prod-eu-west-1 447015923388 sk_live Priya priya.nair; do
-  n=$(grep -rIF --exclude-dir=.git -- "$v" workspace/ghost | wc -l | tr -d ' ')
-  [ "$n" != 0 ] && echo "LEAK: $v ($n)"
-done
-echo "leak scan done"
+ghostc verify --ghost workspace/ghost --mapping workspace/private/mapping.json
 ```
 
-Expected: only `leak scan done` — no `LEAK:` lines.
+Expected:
+
+```
+PASS  workspace/ghost
+  [ok  ] leak_scan — no real value present in the ghost tree
+  [ok  ] mapping_leak — no mapping store material in the ghost tree
+  [skip] build — yarn / node_modules unavailable (yarn lint not run)
+```
+
+Three checks, all fail-closed: **leak_scan** (`\b`-anchored, non-overlapping scan for every
+`real` value in the mapping store + every seed spelling in `privacy.yaml`), **mapping_leak**
+(any mapping-shaped file — real values / `real_sha256` — anywhere under the ghost), **build**
+(`yarn lint`; `skipped` when the toolchain/deps are absent — `--require-build` turns that skip
+into a block). Emits `verify.scan` + `verify.pass` / `verify.block` to the audit log; exits 1
+on `BLOCK`.
+
+Plant a leak to see it block:
+
+```bash
+echo '// SkyRoute Data Ltd' >> workspace/ghost/README.md
+ghostc verify --ghost workspace/ghost --mapping workspace/private/mapping.json   # BLOCK, exit 1
+ghostc compile --repo workspace/real >/dev/null   # rebuild the clean ghost
+```
 
 Ghost JS still parses:
 
@@ -130,7 +147,7 @@ for f in workspace/ghost/src/integrations/*.js; do node --check "$f" && echo "OK
 Recompiling yields an identical mapping (bar timestamps):
 
 ```bash
-cp workspace/mapping.json /tmp/m1.json
+cp workspace/private/mapping.json /tmp/m1.json
 ghostc compile --repo workspace/real >/dev/null
 python -c "
 import json
@@ -138,7 +155,7 @@ def norm(p):
     d=json.load(open(p)); d.pop('updated',None); d.pop('created',None)
     for e in d['entries']: e.pop('first_seen_run',None)
     return json.dumps(d,sort_keys=True)
-print('identical' if norm('/tmp/m1.json')==norm('workspace/mapping.json') else 'DRIFT')
+print('identical' if norm('/tmp/m1.json')==norm('workspace/private/mapping.json') else 'DRIFT')
 "
 ```
 
@@ -168,7 +185,6 @@ Each exits non-zero with a pointer to `PROGRESS.md`:
 
 ```bash
 ghostc discover    --repo workspace/real
-ghostc verify      --ghost workspace/ghost
 ghostc apply-patch --ghost-diff /dev/null --real workspace/real
 ghostc eval
 ```

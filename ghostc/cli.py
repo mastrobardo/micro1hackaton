@@ -1,11 +1,9 @@
 """ghostc command-line interface.
 
-Implemented today:  validate-config
-Stubs (see PROGRESS.md):  discover, compile, verify, apply-patch, eval
+Implemented today:  validate-config, compile
+Stubs (see PROGRESS.md):  discover, verify, apply-patch, eval
 """
 from __future__ import annotations
-
-import sys
 
 import click
 
@@ -63,13 +61,18 @@ def discover(repo: str, config_path: str) -> None:
 @click.option("--repo", required=True, type=click.Path())
 @click.option("--config", "config_path", default="privacy.yaml", show_default=True,
               type=click.Path())
-@click.option("--out", default="workspace/ghost", show_default=True, type=click.Path())
-@click.option("--mapping", "mapping_path", default="workspace/mapping.json",
-              show_default=True, type=click.Path())
-@click.option("--audit", "audit_path", default="workspace/audit.jsonl",
-              show_default=True, type=click.Path())
+@click.option("--out", default="workspace/ghost", show_default=True, type=click.Path(),
+              help="Ghost repo — the only output that crosses the privacy boundary.")
+@click.option("--spec", "spec_path", default="workspace/ghost-spec.md",
+              show_default=True, type=click.Path(),
+              help="Ghost spec — crosses alongside the ghost; kept a sibling, never inside it.")
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path(),
+              help="Mapping store — boundary-internal, holds real values. Never crosses.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path(), help="Audit log — boundary-internal.")
 @click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
-def compile(repo: str, config_path: str, out: str, mapping_path: str,
+def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path: str,
             audit_path: str, dry_run: bool) -> None:
     """Compile REPO into a privacy-safe ghost repo + ghost spec."""
     from ghostc.compile import compile_repo
@@ -87,7 +90,7 @@ def compile(repo: str, config_path: str, out: str, mapping_path: str,
             "Add `approved_by:` in the config before compiling."
         )
 
-    result = compile_repo(repo, config_path=config_path, out=out,
+    result = compile_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
                           mapping_path=mapping_path, audit_path=audit_path,
                           dry_run=dry_run)
     click.echo(result.summary())
@@ -95,15 +98,42 @@ def compile(repo: str, config_path: str, out: str, mapping_path: str,
 
 @main.command()
 @click.option("--ghost", required=True, type=click.Path())
-@click.option("--mapping", default="workspace/mapping.json", type=click.Path())
-def verify(ghost: str, mapping: str) -> None:
-    """Leak scan + build gate over the ghost repo. Fail closed."""
-    raise SystemExit(f"ghostc verify: {_STUB}")
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--operation-id", default=None, help="Correlate with a prior compile run.")
+@click.option("--require-build", is_flag=True,
+              help="Treat an unrunnable yarn lint as a block (fail closed on the build gate too).")
+def verify(ghost: str, mapping_path: str, config_path: str, audit_path: str,
+           operation_id: str | None, require_build: bool) -> None:
+    """Leak scan + mapping-leak scan + build gate over the ghost repo. Fail closed."""
+    from ghostc.audit import AuditLog
+    from ghostc.verify import verify_ghost
+
+    result = verify_ghost(ghost, mapping_path, config_path=config_path,
+                          require_build=require_build)
+
+    audit = AuditLog(audit_path, operation_id)
+    audit.emit("verify.scan", "verifier", subject={"file": str(result.ghost)},
+               details={c.name: c.status for c in result.checks})
+    if result.ok:
+        audit.emit("verify.pass", "verifier", subject={"file": str(result.ghost)})
+    else:
+        audit.emit("verify.block", "verifier", subject={"file": str(result.ghost)},
+                   decision="block", details={"reasons": [c.name for c in result.checks
+                                                          if c.status == "fail"]})
+
+    click.echo(result.summary())
+    if not result.ok:
+        raise SystemExit(1)
 
 
 @main.command("apply-patch")
 @click.option("--ghost-diff", required=True, type=click.Path())
-@click.option("--mapping", default="workspace/mapping.json", type=click.Path())
+@click.option("--mapping", default="workspace/private/mapping.json", type=click.Path())
 @click.option("--real", required=True, type=click.Path())
 def apply_patch(ghost_diff: str, mapping: str, real: str) -> None:
     """Translate a ghost PR diff into a real PR diff. Reject ambiguous mappings."""

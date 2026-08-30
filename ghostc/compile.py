@@ -93,13 +93,15 @@ def _rename_path(rel: str, matchers) -> tuple[str, list]:
 
 def compile_repo(repo: str, config_path: str = "privacy.yaml",
                  out: str = "workspace/ghost",
-                 mapping_path: str = "workspace/mapping.json",
-                 audit_path: str = "workspace/audit.jsonl",
+                 mapping_path: str = "workspace/private/mapping.json",
+                 audit_path: str = "workspace/private/audit.jsonl",
+                 spec_path: str = "workspace/ghost-spec.md",
                  dry_run: bool = False) -> CompileResult:
     repo_p = Path(repo)
     if not repo_p.is_dir():
         raise SystemExit(f"repo not found: {repo}")
     out_p = Path(out)
+    _assert_outside_ghost(out_p, mapping=mapping_path, audit=audit_path, spec=spec_path)
     cfg = load_config(config_path)
     exclusions = cfg.get("exclusions", [])
     matchers = build_matchers(cfg)
@@ -200,7 +202,9 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
         store.save()
 
     if not dry_run:
-        _write_ghost_spec(out_p, result, op)
+        _write_ghost_spec(Path(spec_path), result, op)
+        _assert_ghost_tree_is_clean(out_p, mapping=mapping_path, audit=audit_path,
+                                    spec=spec_path)
         _git_baseline(out_p)
 
     audit.emit("run.end", "compiler",
@@ -222,7 +226,35 @@ def _dedup_occ(occ: list[dict]) -> list[dict]:
     return out
 
 
-def _write_ghost_spec(out_p: Path, result: CompileResult, op: str) -> None:
+def _boundary_internal(out_p: Path, **named: str) -> list[str]:
+    """Names of artifact paths that resolve to somewhere inside the ghost repo."""
+    root = out_p.resolve()
+    return [name for name, p in named.items() if Path(p).resolve().is_relative_to(root)]
+
+
+def _assert_outside_ghost(out_p: Path, **named: str) -> None:
+    bad = _boundary_internal(out_p, **named)
+    if bad:
+        raise SystemExit(
+            f"refusing to run: {', '.join(bad)} path(s) resolve inside the ghost repo "
+            f"({out_p}). The ghost tree must mirror the real repo and nothing else — "
+            "keep the mapping/audit under workspace/private/ and the spec a sibling of the ghost."
+        )
+
+
+def _assert_ghost_tree_is_clean(out_p: Path, **named: str) -> None:
+    """Post-write guard: none of our generated artifacts landed inside the ghost tree."""
+    root = out_p.resolve()
+    leaked = sorted(
+        str(Path(p).resolve().relative_to(root))
+        for p in named.values()
+        if Path(p).resolve().is_relative_to(root) and Path(p).exists()
+    )
+    if leaked:
+        raise SystemExit(f"boundary violation: generated metadata inside the ghost repo: {leaked}")
+
+
+def _write_ghost_spec(spec_p: Path, result: CompileResult, op: str) -> None:
     rows = "\n".join(
         f"| `{r.entity_id}` | {r.kind} | {r.level} | `{r.ghost or '<removed>'}` | {len(r.occurrences)} |"
         for r in sorted(result.entities.values(), key=lambda r: (r.level, r.entity_id))
@@ -238,7 +270,8 @@ coding agent. Contains **no real values** — only the aliases it will see.
 
 Files scanned: {result.files_scanned} · changed: {result.files_changed} · renamed: {result.files_renamed}
 """
-    (out_p.parent / "ghost-spec.md").write_text(spec, encoding="utf-8")
+    spec_p.parent.mkdir(parents=True, exist_ok=True)
+    spec_p.write_text(spec, encoding="utf-8")
 
 
 def _git_baseline(out_p: Path) -> None:

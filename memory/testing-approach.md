@@ -5,9 +5,9 @@ metadata:
   type: project
 ---
 
-**STATUS 2026-08-30: the `tests/` suite is NOT yet on disk.** `ghostc compile` landed first (see [[compiler-and-alias-model]]); the suite below is the next task. When writing it, add `test_aliasing.py` (segment engine round-trips + `splice_span`), `test_matching.py` (remove/level tie priority, multi-entity compound tokens), and `test_compile.py` (0 real values in ghost, determinism, `.git` not copied, path rename, spec has no real values, frozen-alias reuse). `test_fixture_groundtruth.py` must match on token boundaries, not `grep -F` substrings.
+**STATUS 2026-08-30: the `tests/` suite is ON DISK and green** — `pytest -q` → 87 passed / 1 skipped (fixture built), 65 passed / 23 skipped (clean checkout, `workspace/real/` absent). All files below exist plus `test_aliasing.py`, `test_matching.py`, `test_compile.py`, `test_cli.py`, `test_determinism.py`, and `tests/gen_groundtruth.py` (regenerates the frozen baseline). The leak scanner now lives in `ghostc/scanning.py` as `anchored_scan()` — **non-overlapping, `(?<![A-Za-z0-9_])…(?![A-Za-z0-9_])`-anchored, longest-needle-first** (not `grep -F`: that false-positives `ip-a` in `strip-ansi` and double-counts `Northwind` inside `Northwind Airlines`). `tests/conftest.py::scan_entity_hits()` and `ghostc verify` both call it. Also: `load_config` raises `ConfigError` on duplicate entity ids. New: `tests/test_verify.py` (15 cases) covers the fail-closed gate — see [[verify-and-leak-scan]].
 
-The scaffold phase is tested with a `pytest` suite under `tests/`. Run: `pip install -e ".[dev]" && pytest -q`. Green from a clean env is the Reproducibility (15 pts) signal for judging.
+The scaffold phase is tested with a `pytest` suite under `tests/`. Run: `pip install -e ".[dev]" && pytest -q`. Green from a clean env is the Reproducibility (15 pts) signal for judging. Fixture-dependent tests skip (never fail) when `workspace/real/` is missing.
 
 What it covers:
 - `test_schemas.py` — the 3 JSON schemas are valid Draft 2020-12; `privacy.yaml` + sample `mapping.json` / `audit.jsonl` validate.
