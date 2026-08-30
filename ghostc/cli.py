@@ -1,7 +1,7 @@
 """ghostc command-line interface.
 
-Implemented today:  validate-config, compile
-Stubs (see PROGRESS.md):  discover, verify, apply-patch, eval
+Implemented today:  validate-config, compile, verify, baseline, eval
+Stubs (see PROGRESS.md):  discover, apply-patch
 """
 from __future__ import annotations
 
@@ -131,21 +131,104 @@ def verify(ghost: str, mapping_path: str, config_path: str, audit_path: str,
         raise SystemExit(1)
 
 
+@main.command()
+@click.option("--repo", required=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--out", default="workspace/baseline-ghost", show_default=True,
+              type=click.Path(), help="Baseline repo — the keyword-redaction comparator.")
+@click.option("--spec", "spec_path", default="workspace/baseline-spec.md",
+              show_default=True, type=click.Path())
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
+def baseline(repo: str, config_path: str, out: str, spec_path: str, audit_path: str,
+             dry_run: bool) -> None:
+    """Dumb keyword redaction — the fair baseline `eval` compares `compile` against."""
+    from ghostc.baseline import baseline_repo
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = baseline_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
+                           audit_path=audit_path, dry_run=dry_run)
+    click.echo(result.summary())
+
+
 @main.command("apply-patch")
-@click.option("--ghost-diff", required=True, type=click.Path())
-@click.option("--mapping", default="workspace/private/mapping.json", type=click.Path())
-@click.option("--real", required=True, type=click.Path())
-def apply_patch(ghost_diff: str, mapping: str, real: str) -> None:
-    """Translate a ghost PR diff into a real PR diff. Reject ambiguous mappings."""
-    raise SystemExit(f"ghostc apply-patch: {_STUB}")
+@click.option("--ghost-diff", required=True, type=click.Path(exists=True))
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--real", "real_repo", default=None, type=click.Path(),
+              help="Real repo to apply the translated diff into (with --apply).")
+@click.option("--out", "out_path", default=None, type=click.Path(),
+              help="Write the real diff here (default: stdout).")
+@click.option("--mapping-version", type=int, default=None,
+              help="Reject if the store's mapping_version differs.")
+@click.option("--apply", "do_apply", is_flag=True,
+              help="git apply --3way the translated diff onto a new branch in --real.")
+@click.option("--branch", default="ghostc/reverse-patch", show_default=True)
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+def apply_patch(ghost_diff: str, mapping_path: str, config_path: str,
+                real_repo: str | None, out_path: str | None, mapping_version: int | None,
+                do_apply: bool, branch: str, audit_path: str) -> None:
+    """Translate a ghost PR diff into a real PR diff. Fail closed on ambiguity."""
+    from ghostc.patch import Rejection, reverse_patch
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    try:
+        result = reverse_patch(ghost_diff, mapping_path, config_path=config_path,
+                               real_repo=real_repo, mapping_version=mapping_version,
+                               do_apply=do_apply, branch=branch, audit_path=audit_path)
+    except Rejection as rej:
+        raise SystemExit(f"REJECTED (fail closed)\n  {rej}")
+
+    if out_path:
+        from pathlib import Path
+
+        Path(out_path).write_text(result.real_diff, encoding="utf-8")
+        click.echo(result.summary())
+    elif do_apply:
+        click.echo(result.summary())
+    else:
+        click.echo(result.real_diff, nl=False)
+        click.echo(result.summary(), err=True)
 
 
 @main.command("eval")
-@click.option("--cases", default="eval/cases", type=click.Path())
-@click.option("--config", "config_path", default="privacy.yaml", type=click.Path())
-def eval_(cases: str, config_path: str) -> None:
-    """Run baseline vs solution over the eval cases; emit the metric table."""
-    raise SystemExit(f"ghostc eval: {_STUB}")
+@click.option("--real", default="workspace/real", show_default=True, type=click.Path())
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--baseline-out", default="workspace/baseline-ghost", show_default=True,
+              type=click.Path())
+@click.option("--compile-out", default="workspace/ghost", show_default=True,
+              type=click.Path())
+@click.option("--report", default="workspace/eval-report", show_default=True,
+              type=click.Path(), help="Writes <report>.md and <report>.csv.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+def eval_(real: str, config_path: str, baseline_out: str, compile_out: str,
+          report: str, audit_path: str) -> None:
+    """Baseline keyword redaction vs `compile`: residual-leak metric (MVP, no agent)."""
+    from ghostc.eval import run_eval
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    result = run_eval(real, config_path=config_path, baseline_out=baseline_out,
+                      compile_out=compile_out, report=report, audit_path=audit_path)
+    click.echo(result.summary())
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
 # ghostc CLI — manual test walkthrough
 
 Copy-paste commands to exercise everything that works today. Run from the repo root
-with the venv active. `discover` / `apply-patch` / `eval` are still stubs (see the last
-section).
+with the venv active. `discover` is the only remaining stub (see the last section).
 
 ```bash
 cd /Users/davide.arcinotti/learn/hackaton
 python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 ghostc --version          # ghostc, version 0.1.0
-ghostc --help             # lists 6 commands
+ghostc --help             # lists 7 commands
 ```
 
 ---
@@ -142,7 +141,97 @@ for f in workspace/ghost/src/integrations/*.js; do node --check "$f" && echo "OK
 
 ---
 
-## 6. Determinism
+## 6. Baseline — the fair comparator
+
+Dumb keyword redaction: the "simple script people use today". **Not** privacy-safe —
+it exists only so `eval` has something honest to beat.
+
+```bash
+ghostc baseline --repo workspace/real
+```
+
+Produces `workspace/baseline-ghost/` (fresh `git init` + baseline commit) and
+`workspace/baseline-spec.md`. Plain case-sensitive global replace of every configured
+spelling → the kebab ghost alias (`REDACTED` for secrets), longest-first. No AST, no
+casing engine, no compound splice, no mapping store (not reversible — the point).
+
+See what a keyword `sed` gets wrong:
+
+```bash
+grep -n 'SKYROUTE\|BOOKING_CORE\|initvendor-c' workspace/baseline-ghost/src/integrations/*.js
+# SKYROUTE_API_KEY / BOOKING_CORE_URL survive (casing variants); initDatadog -> initvendor-c (broken identifier)
+```
+
+---
+
+## 7. Eval — the measured win
+
+```bash
+ghostc eval --real workspace/real       # builds both comparators, writes the report
+```
+
+Expected:
+
+```
+metric                                          baseline     compile
+--------------------------------------------------------------------
+residual entity occurrences (casing-aware)            28           0
+strict token leaks (verify / groundtruth method)            0           0
+...
+PASS: compile residual=0, baseline residual=28
+```
+
+Two leak counts per tree: **casing-aware** (the compiler's own matchers run over the
+tree in detector mode — the primary metric) and **strict** (`anchored_scan` over
+configured spellings — the `verify` / `groundtruth.json` method). Strict reads 0/0
+because every configured spelling on this fixture is an exact keyword, so a keyword
+`sed` neutralises all of them — that blind spot is why the casing-aware detector is
+the primary metric. MVP: no external agent, so task pass rate / approvals / wall-clock
+/ tokens are `n/a`.
+
+```bash
+cat workspace/eval-report.md
+cat workspace/eval-report.csv
+python -c "import json,collections; c=collections.Counter(json.loads(l)['event'] \
+  for l in open('workspace/private/audit.jsonl') if json.loads(l).get('component')=='eval'); \
+  [print(f'  {k}: {v}') for k,v in sorted(c.items())]"
+```
+
+---
+
+## 8. Apply-patch — ghost PR diff → real PR diff
+
+The external agent works on the ghost and produces a diff. Translate it back:
+
+```bash
+# make a change in the ghost, capture the diff the agent would produce
+(cd workspace/ghost && sed -i '' 's#function resolve(serviceKey) {#function resolve(serviceKey) {\
+  console.log(process.env.SERVICE_A_URL);#' src/integrations/internalServices.js \
+  && git diff > /tmp/ghost.diff && git checkout .)
+
+ghostc apply-patch --ghost-diff /tmp/ghost.diff --mapping workspace/private/mapping.json
+```
+
+The real diff prints to stdout — `service-a` → `booking-core`, `SERVICE_A_URL` →
+`BOOKING_CORE_URL`, context lines translated too so it applies. Summary (entities resolved,
+any `LOSSY` multi-word names) goes to stderr. Add `--out real.diff` to write it, or
+`--apply --real <repo>` to land it on a branch (`git apply --3way`).
+
+Fail-closed rejects (exit 1, `patch.rejected` audit, nothing written):
+
+```bash
+printf '%s\n' '--- a/x' '+++ b/x' '@@ -1 +1 @@' '+use service-z here' > /tmp/bad.diff
+ghostc apply-patch --ghost-diff /tmp/bad.diff --mapping workspace/private/mapping.json
+# REJECTED: unmapped ghost-alias-shaped token: service-z
+
+printf '%s\n' '--- a/x' '+++ b/x' '@@ -1 +1 @@' '+contact Northwind Airlines' > /tmp/bad2.diff
+ghostc apply-patch --ghost-diff /tmp/bad2.diff --mapping workspace/private/mapping.json
+# REJECTED: unexpected real entity in the ghost diff: client_northwind
+```
+
+---
+
+## 9. Determinism
 
 Recompiling yields an identical mapping (bar timestamps):
 
@@ -161,7 +250,7 @@ print('identical' if norm('/tmp/m1.json')==norm('workspace/private/mapping.json'
 
 ---
 
-## 7. Approval gate
+## 10. Approval gate
 
 `compile` refuses to run while a `restricted` entity from `discover`/`human` has no
 `approved_by`:
@@ -179,12 +268,10 @@ ghostc compile --repo workspace/real --config /tmp/pending.yaml   # -> BLOCKED .
 
 ---
 
-## 8. Stubs (not implemented yet)
+## 11. Stub (not implemented yet)
 
-Each exits non-zero with a pointer to `PROGRESS.md`:
+`discover` exits non-zero with a pointer to `PROGRESS.md`:
 
 ```bash
-ghostc discover    --repo workspace/real
-ghostc apply-patch --ghost-diff /dev/null --real workspace/real
-ghostc eval
+ghostc discover --repo workspace/real
 ```

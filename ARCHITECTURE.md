@@ -62,6 +62,15 @@ tree-sitter grammars: `javascript`, `typescript`, `tsx`, `hcl`. Everything else 
 `.json`, `.env*`, `.md`, `Dockerfile`) goes through a scoped literal + regex matcher that only
 touches configured entity values, never arbitrary strings.
 
+## Evaluation
+
+| Component | Kind | Input | Output | Contract |
+|---|---|---|---|---|
+| **Baseline** (`ghostc baseline`) | deterministic | real repo, `privacy.yaml` | `workspace/baseline-ghost/` + `baseline-spec.md` | The fair comparator, **not** a shippable ghost. Plain case-sensitive keyword replace of configured spellings only — no AST, casing engine, compound splice, graph, or mapping store. Reuses the compiler's file-walk so `eval` compares like with like. |
+| **Eval harness** (`ghostc eval`) | deterministic | real repo, `privacy.yaml` | `workspace/eval-report.{md,csv}` + `eval.*` audit events | Builds baseline + compile ghosts, counts residual real-entity occurrences in each — **casing-aware** (compiler matchers in detector mode, primary metric) and **strict** (`anchored_scan`, the `verify` method). MVP: no external agent; task/approval/latency/token rows are `n/a`. |
+
+On the fixture: baseline leaves **28** residual occurrences, `compile` leaves **0**.
+
 ## Monitoring is first-class
 
 Every step emits a structured audit event. The eval report is **derived from the audit log**,

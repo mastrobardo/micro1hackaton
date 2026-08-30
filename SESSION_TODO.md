@@ -5,53 +5,67 @@ decision log: `PROGRESS.md` (read it first). Memory index: `memory/MEMORY.md`.
 
 ## State
 
-- `pytest` → **109 passed, 1 skipped** (fixture built) / green from a clean checkout.
-- Implemented: `validate-config`, `compile`, `verify`. Stubs: `discover`, `apply-patch`, `eval`.
+- `pytest` → **131 passed, 1 skipped** (fixture built) / green from a clean checkout.
+- Implemented: `validate-config`, `compile`, `verify`, `baseline`, `eval`, `apply-patch`.
+  Stub: `discover` (only).
 - Working tree is **uncommitted** (user commits each iteration as a CHANGELOG entry). Untracked:
-  `ghostc/scanning.py`, `ghostc/verify.py`, `tests/`, `memory/verify-and-leak-scan.md`.
+  `ghostc/{scanning,verify,baseline,eval,patch}.py`, `tests/`, `CHANGELOG.md`,
+  `memory/{verify-and-leak-scan,baseline-and-eval,reverse-patch-compiler}.md`.
 - Boundary layout is live: `workspace/ghost/` + sibling `workspace/ghost-spec.md` cross;
   `workspace/private/{mapping.json,audit.jsonl}` never cross.
 - One leak-scan implementation: `ghostc/scanning.anchored_scan` (reuse it everywhere).
+- **Measured (`ghostc eval`, fixture):** baseline keyword redaction leaves **28** residual
+  real-entity occurrences (casing-aware detector); `compile` leaves **0**. Strict exact-spelling
+  scan reads 0/0 — it can't see the difference on this fixture, which is why the casing-aware
+  detector is the primary metric. Report: `workspace/eval-report.{md,csv}`. Changelog:
+  `CHANGELOG.md`.
+- The whole pipeline round-trips: `compile` → `verify` → (agent) → `apply-patch` → real branch.
 
-## NEXT (in order)
+## NEXT: the detection overhaul (its own measured iteration — see the section below)
 
-### 1. Baseline keyword-`sed` redaction path
-The hackathon is scored on beating a **fair baseline**. Baseline = dumb keyword redaction:
-for every entity, replace each `real` + `match[]` spelling with the ghost alias (or `REDACTED`
-for `remove`) as a plain case-sensitive global string replace — **no AST, no casing engine, no
-compound-token splice, no graph**. Same downstream (same external agent, same eval cases).
+## Completed this iteration
 
-- Add `ghostc baseline --repo … --out workspace/baseline-ghost/ --config privacy.yaml`
-  (or `scripts/baseline.sh`) producing a tree the same shape `compile` produces, so `eval`
-  runs both through identical steps.
-- Deterministic; write a `baseline-spec.md` sibling if useful; no mapping store needed
-  (baseline is not reversible — that's part of the point).
-- It **will** leak: `bookingCore` when the keyword is `booking-core`, `SKYROUTE_API_KEY`,
-  `northwind-skyroute-connector`, prose casing. That gap vs `compile` is the measured win.
-- Test: `tests/test_baseline.py` — runs, deterministic, and `verify`/`anchored_scan` finds
-  **>0** leaks on the baseline ghost (asserting the baseline is genuinely weaker).
+### 1. Baseline keyword-`sed` redaction path — DONE
+`ghostc baseline --repo … --out workspace/baseline-ghost/` — plain case-sensitive global
+replace of every `real` + `match[]` literal/identifier spelling with the kebab ghost alias
+(`REDACTED` for `remove`), longest-first. No AST/casing engine/splice/graph, no mapping store.
+Deterministic, git baseline commit, `baseline-spec.md` sibling. `ghostc/baseline.py` ·
+`tests/test_baseline.py`. It leaks exactly the casing variants a keyword `sed` can't see
+(`SKYROUTE_API_KEY`, `bookingCore`, `BOOKING_CORE_URL`, …) and corrupts identifiers
+(`initDatadog` → `initvendor-c`) — both on purpose.
 
-### 2. `ghostc eval`
-- 10 cases + 1 hard — see `PROGRESS.md` → "Eval cases". **Review them with the user first**
-  (open question 3 below).
-- MVP metric without the agent: compile the fixture via `compile` and via `baseline`, run
-  `anchored_scan` (seed values from `tests/expected/groundtruth.json`) on each → leak count
-  per approach. That alone fills the primary-metric row.
-- Full metric: run the external agent on each ghost for each case → task pass rate, human
-  approvals, wall-clock, token cost. Emit `workspace/eval-report.md` + `.csv`.
-- Audit: `eval` events under component `eval`.
+### 2. `ghostc eval` — DONE (MVP, no external agent)
+`ghostc eval --real workspace/real` builds both comparators and counts residual real-entity
+occurrences two ways: **casing-aware** (the compiler's own matchers via
+`compile_repo(tree, dry_run=True)` in detector mode — the primary metric) and **strict**
+(`anchored_scan` over configured spellings — `verify` / groundtruth method). Emits
+`workspace/eval-report.{md,csv}`; audit events under component `eval`. `ghostc/eval.py` ·
+`tests/test_eval.py`.
 
-### 3. `ghostc apply-patch`
-Ghost diff → real diff via the mapping store. Reject: unmapped ghost-alias-shaped tokens,
-unexpected real entities, mapping-version mismatch, ambiguous resolution. Reuse `anchored_scan`
-for the ambiguity/leak checks. Audit: `patch.parsed` / `patch.entity_resolved` /
-`patch.applied` / `patch.rejected`.
+Deferred to the external-agent iteration (open question 3): the 10 + 1 eval **tasks** and the
+full metric (task pass rate, approvals, wall-clock, token cost). The MVP fills the
+primary-metric row only.
 
-### 4. `CHANGELOG.md`
-Start the evidence-linked Improvement Changelog: baseline row → each iteration → final, every
-row linked to an audit-log slice or a test.
+### 3. `ghostc apply-patch` — DONE
+Ghost PR diff → real PR diff. `ghostc/patch.py` · `tests/test_apply_patch.py`. Two-pass
+translation: exact `ghost`→`real` literal (token-boundary anchored, longest first), then
+segment splicing for the remaining casings (`vendorA`→`skyRoute`, `VENDOR_A_URL`→`SKYROUTE_URL`,
+`vendorAClient.js`→`skyRouteClient.js`), reusing `ghostc/aliasing.splice_span`. Context lines
+are translated too so the real diff applies. Fail closed (`Rejection`, exit 1, `patch.rejected`
+audit, nothing written): unmapped ghost-alias-shaped token · real value present in the ghost
+diff (named by entity id, never cleartext) · `--mapping-version` mismatch · duplicate ghost
+alias. `--apply` → `git apply --3way` onto `--branch` in `--real`. Audit: `patch.parsed` /
+`patch.entity_resolved` (per entity, `real_sha256`, `lossy` flag) / `patch.applied` /
+`patch.rejected`. Known lossy: multi-word display names (`Northwind Airlines`, `SkyRoute Data
+Ltd`) — code tokens round-trip exactly, prose casing lands approximately, flagged for the
+downstream human review gate (open question 1 is the same limitation).
 
-## THEN: detection overhaul (own iteration, after the loop above closes)
+### 4. `CHANGELOG.md` — DONE
+`CHANGELOG.md` at the repo root: evidence-linked Improvement Changelog. Rows: baseline (28
+residual) → 001 compiler (0) → 002 verify → 003 reverse patch + eval → next (detection
+overhaul). Every row links a test and/or an audit-event family. Numbers from `ghostc eval`.
+
+## NEXT: detection overhaul (its own measured iteration)
 
 Measured vs `tests/expected/groundtruth.json` (precision/recall/F1 per layer):
 1. **Candidate scoring model** — replace binary `Hit` with `Candidate{span, entity_id|None,
