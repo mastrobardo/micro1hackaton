@@ -15,6 +15,36 @@ import pytest
 from ghostc.scanning import anchored_scan
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Agent-workflow env vars. The suite must stay offline + reproducible no matter
+# what the developer has in their real .env — see _hermetic_agent_env below.
+_AGENT_ENV_VARS = (
+    "ANTHROPIC_API_KEY", "CLIENT_ANTHROPIC_API_KEY", "CONSULTANCY_ANTHROPIC_API_KEY",
+    "LANGSMITH_API_KEY", "CLIENT_LANGSMITH_API_KEY", "CONSULTANCY_LANGSMITH_API_KEY",
+    "LANGSMITH_TRACING", "LANGSMITH_PROJECT",
+    "CLIENT_LANGSMITH_PROJECT", "CONSULTANCY_LANGSMITH_PROJECT",
+    "LANGSMITH_ENDPOINT", "CLIENT_LANGSMITH_ENDPOINT", "CONSULTANCY_LANGSMITH_ENDPOINT",
+    "GHOSTC_AGENT_BACKEND", "GHOSTC_AGENT_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_agent_env(monkeypatch):
+    """Every test runs as if there were no `.env` and no ambient agent credentials:
+    point `GHOSTC_ENV_FILE` at nothing and strip the agent env vars. Tests that
+    exercise env loading / key resolution set their own `GHOSTC_ENV_FILE` + vars
+    (their monkeypatch wins — it is applied after this one)."""
+    monkeypatch.setenv("GHOSTC_ENV_FILE", str(REPO_ROOT / "tests" / ".nonexistent.env"))
+    for var in _AGENT_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    try:  # reset load_env()'s memo so a prior test's load does not leak
+        import bridge.env as _be
+
+        monkeypatch.setattr(_be, "_LOADED", None, raising=False)
+    except Exception:
+        pass
+
+
 SEED_LITERALS = [
     # raw spellings that must never survive into the ghost (superset of cli.md's list)
     "Northwind", "SkyRoute", "skyroute", "AeroFeed", "aerofeed", "Datadog", "datadoghq",

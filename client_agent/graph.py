@@ -27,7 +27,9 @@ from typing import Callable
 from langgraph.graph import END, START, StateGraph
 
 from bridge.forge import LocalBareForge
+from bridge.env import load_env
 from bridge.llm import configure_langsmith, get_llm
+from bridge.trace import traceable
 from client_agent.state import TaskState, new_state
 from consultancy_agent.sim import run_consultancy
 from ghostc.audit import AuditLog, new_operation_id
@@ -89,7 +91,7 @@ def build_client_graph(*, forge: LocalBareForge, audit: AuditLog, config_path: s
                        mapping_path: str, audit_path: str, real_repo: str,
                        scratch: Path, backend: str,
                        consultancy_fn: ConsultancyFn):
-    llm = get_llm(backend)
+    llm = get_llm(backend, role="client")
     mapping_version = MappingStore(mapping_path).data.get("mapping_version", 1)
 
     def plan(state: TaskState) -> dict:
@@ -215,7 +217,7 @@ def build_client_graph(*, forge: LocalBareForge, audit: AuditLog, config_path: s
                      ("reverse_patch", reverse_patch_node), ("verify", verify_node),
                      ("consistency", consistency_node), ("open_real_pr", open_real_pr),
                      ("emit_metrics", emit_metrics)]:
-        g.add_node(name, fn)
+        g.add_node(name, traceable(run_type="chain", name=f"node:{name}")(fn))
     _wire(g)
     return g.compile()
 
@@ -246,6 +248,7 @@ def _parse_verdict(text: str) -> tuple[str, list[str]]:
     return ("flagged", ["unparseable consistency reply"])
 
 
+@traceable(run_type="chain", name="client.run_task")
 def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
              config_path: str = "privacy.yaml",
              mapping_path: str = "workspace/private/mapping.json",
@@ -258,7 +261,8 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
         if not Path(p).exists():
             raise SystemExit(f"{label} not found: {p} (run `ghostc compile` first)")
 
-    configure_langsmith()
+    load_env()
+    configure_langsmith(role="client")
     ws = Path(workspace)
     scratch = ws / "scratch"
     scratch.mkdir(parents=True, exist_ok=True)

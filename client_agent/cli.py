@@ -13,12 +13,16 @@ from pathlib import Path
 
 import click
 
+from bridge.env import load_env
 from ghostc.config import ConfigError, load_config
 
 
 @click.group()
 def main() -> None:
     """Client-side agent: real task -> ghost branch + TASK.md -> ghost PR -> real-repo PR."""
+    # Load .env (repo root or $GHOSTC_ENV_FILE) before anything reads os.environ.
+    # Never overrides a var already set in the real environment.
+    load_env()
 
 
 @main.command("run-task")

@@ -13,8 +13,10 @@ reverse patch compiler's fail-closed checks pass — and never touches real stat
 from __future__ import annotations
 
 from bridge.forge import Forge
+from bridge.trace import traceable
 
 
+@traceable(run_type="chain", name="consultancy:sim")
 def run_consultancy(forge: Forge, repo: str, *, task_branch: str, impl_branch: str,
                     task_id: str, ghost_task: str, substitutions: list[dict],
                     title: str | None = None) -> str:

@@ -1,0 +1,105 @@
+# Privacy configuration for the runnable webapp fixture (fixtures/webapp/app).
+#
+# A focused subset of the repo-root privacy.yaml — same schema, same aliases — kept
+# separate so the webapp demo compiles only the entities its code actually uses.
+# Validate: ghostc validate-config --config fixtures/webapp/privacy.webapp.yaml
+
+version: 1
+mapping_version: 1
+
+levels:
+  public: { transform: false, approval: none }
+  internal: { transform: true, approval: auto }
+  confidential: { transform: true, approval: auto_if_unambiguous }
+  restricted: { transform: true, approval: human, blocks_sync: true }
+
+strategies: [semantic_alias, synthetic_id, synthetic_endpoint, generalize, remove]
+
+defaults_by_kind:
+  vendor: { strategy: semantic_alias, level: internal }
+  client: { strategy: synthetic_id, level: restricted }
+  internal_service: { strategy: semantic_alias, level: confidential }
+  domain: { strategy: synthetic_endpoint, level: confidential }
+  secret: { strategy: remove, level: restricted }
+  person: { strategy: synthetic_id, level: restricted }
+
+detection:
+  auto_threshold: 0.90
+  review_threshold: 0.45
+  auto_alias: false
+  decode_pass: true
+
+exclusions:
+  - "**/node_modules/**"
+  - "**/.git/**"
+  - "**/dist/**"
+  - "**/package-lock.json"
+  - "**/*.png"
+  - "**/*.ico"
+
+entities:
+  # --- client identity ------------------------------------------------------
+  - id: client_northwind
+    real: "Northwind Airlines"
+    match:
+      - { kind: literal, value: "Northwind" }
+      - { kind: identifier, value: "northwind" }
+      - { kind: identifier, value: "NWA" }
+    kind: client
+    level: restricted
+    strategy: synthetic_id
+    ghost: "client-a"
+    note: "Fictional airline the console belongs to. Direct identity."
+    source: seed
+
+  # --- commercial data vendor --------------------------------------------
+  - id: vendor_skyroute
+    real: "SkyRoute Data Ltd"
+    match:
+      - { kind: literal, value: "SkyRoute" }
+      - { kind: identifier, value: "skyroute" }
+      - { kind: identifier, value: "skyRoute" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "vendor-a"
+    note: "Fictional flight-schedule data supplier. Contract-sensitive."
+    source: seed
+
+  # --- internal service -------------------------------------------------
+  - id: svc_booking_core
+    real: "booking-core"
+    kind: internal_service
+    level: confidential
+    strategy: semantic_alias
+    ghost: "service-a"
+    source: seed
+
+  # --- infrastructure -------------------------------------------------
+  - id: infra_internal_host
+    real: "api.northwind-internal.net"
+    kind: domain
+    level: confidential
+    strategy: synthetic_endpoint
+    ghost: "host-a.example"
+    source: seed
+
+  # --- person (PII) ---------------------------------------------------
+  - id: person_service_owner
+    real: "Priya Nair"
+    kind: person
+    level: restricted
+    strategy: synthetic_id
+    ghost: "person-a"
+    note: "Fictional internal engineer named as booking-core's owner. PII."
+    source: seed
+
+  # --- secret -------------------------------------------------------
+  - id: secret_skyroute_key
+    real: "sk_live_northwind_9f3ab7c21e5d4088"
+    kind: secret
+    level: restricted
+    strategy: remove
+    ghost: ""
+    note: "Fictional API key. Value removed; env var name retained."
+    source: seed

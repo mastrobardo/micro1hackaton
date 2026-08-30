@@ -33,6 +33,42 @@ Entrypoints: `ghostc` (compiler), `ghostc-agent run-task | print-graph`, `ghostc
 Extras: `[agents]` = langgraph/langsmith/anthropic; `[mcp]` = `mcp>=2.0` (v2: `MCPServer`,
 not `FastMCP`). `compile-spec` stays on the `ghostc` CLI (deterministic, no LLM).
 
+## Env config (`bridge/env.py` + per-agent keys in `bridge/llm.py`, added 2026-08-31)
+
+One source: a gitignored `.env` at the repo root (template `.env.example`). `bridge.env.load_env()`
+— a thin wrapper over `python-dotenv` (`[agents]` extra) keeping our explicit search path +
+no-override + applied-keys return — is called by `client_agent/cli.py::main()` and
+`client_agent/graph.py::run_task()` before anything reads `os.environ`. **Never overrides a
+var already set** in the real environment, so shell export / CI secret / `docker run -e` win;
+`.env` is only the local default. `$GHOSTC_ENV_FILE` overrides the path (used exclusively, no
+fallback). `ghostc` core reads none of these. Phase E `docker compose` passes the same `.env`
+to each agent service via `env_file:`. Tests: `tests/test_env.py` (5).
+
+**Per-agent credentials** (`bridge/llm.py`, `role` ∈ `client` | `consultancy`).
+`resolve_secret(name, role)` reads `{ROLE}_{name}` then bare `{name}`, so one shared key
+still works but the two agents can be split for separate billing / trace orgs / blast radius:
+
+| resolved | falls back to |
+|---|---|
+| `CLIENT_ANTHROPIC_API_KEY` / `CONSULTANCY_ANTHROPIC_API_KEY` | `ANTHROPIC_API_KEY` |
+| `CLIENT_LANGSMITH_API_KEY` / `CONSULTANCY_LANGSMITH_API_KEY` | `LANGSMITH_API_KEY` |
+| `{ROLE}_LANGSMITH_PROJECT` | `LANGSMITH_PROJECT` → `ghostc-<role>` |
+| `{ROLE}_LANGSMITH_ENDPOINT` | `LANGSMITH_ENDPOINT` (EU tenant → `https://eu.api.smith.langchain.com`; US default + EU key = 403) |
+
+`get_llm(backend, role=...)` passes the resolved Anthropic key straight to
+`anthropic.Anthropic(api_key=...)`; `configure_langsmith(role=...)` sets `LANGSMITH_API_KEY`
+/ `LANGSMITH_PROJECT` / `LANGSMITH_ENDPOINT` in the env for the wrapped client. Client side
+wired (`role="client"`); consultancy uses `role="consultancy"` when C2 adds its Claude loop.
+**In-process limit:** `configure_langsmith` sets a process-wide `LANGSMITH_PROJECT`, so
+before the Phase-E process split the last call wins. `GHOSTC_AGENT_MODEL` (`claude-opus-5`)
+and `GHOSTC_AGENT_BACKEND` (auto|claude|stub) stay shared. Tests: `tests/test_llm_roles.py` (11).
+
+**Tracing spans.** `bridge/trace.py` re-exports `langsmith.traceable`, or a no-op passthrough
+without the `[agents]` extra (so decorated modules import in a `[dev]`-only checkout).
+`@traceable` is on `client.run_task`, each graph node (`node:<name>`, wrapped at
+`add_node`), `claude.complete` / `stub.complete` (`run_type="llm"`), and `consultancy:sim`.
+Tests: `tests/test_trace.py` (3).
+
 ## MCP server (`ghostc/mcp_server.py`, `ghostc-mcp`) — hybrid, chosen 2026-08-31
 
 The graph's fixed pipeline nodes still call `ghostc.*` in-process. The MCP server is the

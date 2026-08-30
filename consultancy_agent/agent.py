@@ -10,6 +10,15 @@ Phase C will add: a Claude tool-loop (``list_files`` / ``read_file`` /
 ``write_file`` / ``run_tests``) over the checkout via :mod:`bridge.llm`, then a
 commit + ghost PR via :mod:`bridge.forge`. For now :func:`run_consultancy` in
 :mod:`consultancy_agent.sim` is the deterministic stand-in.
+
+The real loop runs, after :func:`assert_boundary_clean`::
+
+    from bridge.llm import get_llm, configure_langsmith
+    configure_langsmith(role="consultancy")          # -> project ghostc-consultancy
+    llm = get_llm(backend, role="consultancy")       # -> CONSULTANCY_ANTHROPIC_API_KEY
+
+so its Claude calls and traces are billed / recorded separately from the client's.
+In Phase E the consultancy container is only handed the ``CONSULTANCY_*`` keys.
 """
 from __future__ import annotations
 

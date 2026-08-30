@@ -1,0 +1,36 @@
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: #f6f7f9;
+  color: #1c1e21;
+}
+header {
+  background: #12263a;
+  color: #fff;
+  padding: 20px 28px;
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+header h1 { font-size: 20px; margin: 0; }
+.badge {
+  background: #2a6df4;
+  color: #fff;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+main { max-width: 900px; margin: 24px auto; padding: 0 20px; }
+section { background: #fff; border: 1px solid #e3e6ea; border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
+h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; margin: 0 0 12px; }
+dl { display: grid; grid-template-columns: 160px 1fr; gap: 6px 16px; margin: 0; }
+dt { font-weight: 600; }
+dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eceef1; }
+th { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #6b7280; }
+td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }

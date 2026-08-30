@@ -26,7 +26,7 @@ semantic = ["sentence-transformers>=3"]
 # Optional: the LangGraph agent workflow (`ghostc-agent`) + Claude-backed nodes +
 # LangSmith tracing. Absent, `ghostc` core commands and `pytest` are unaffected;
 # the agent tests skip. Without ANTHROPIC_API_KEY the workflow uses a stub LLM.
-agents = ["langgraph>=1.0", "langsmith>=0.4", "anthropic>=0.40"]
+agents = ["langgraph>=1.0", "langsmith>=0.4", "anthropic>=0.40", "python-dotenv>=1.0"]
 # Optional: expose ghostc's deterministic capabilities as MCP tools (`ghostc-mcp`).
 mcp = ["mcp>=2.0"]
 
