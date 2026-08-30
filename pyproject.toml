@@ -3,6 +3,11 @@ name = "ghostc"
 version = "0.1.0"
 description = "Privacy compiler + agent workflow: real repo <-> privacy-safe ghost repo"
 requires-python = ">=3.10"
+# Package layout:
+#   ghostc/            deterministic privacy compiler (this is the library + `ghostc` CLI)
+#   bridge/            boundary-neutral plumbing (git forge, LLM client) — imports neither side
+#   client_agent/      company-side LangGraph orchestrator — imports ghostc + bridge  (`ghostc-agent`)
+#   consultancy_agent/ external coding agent — MUST NOT import ghostc/client_agent
 dependencies = [
     "click>=8.1",
     "PyYAML>=6.0",
@@ -18,9 +23,17 @@ dev = ["pytest>=8.0"]
 # Optional: real sentence embeddings for the semantic detection signal. Absent, the
 # signal falls back to a stdlib char-n-gram cosine (see ghostc/detect/semantic.py).
 semantic = ["sentence-transformers>=3"]
+# Optional: the LangGraph agent workflow (`ghostc-agent`) + Claude-backed nodes +
+# LangSmith tracing. Absent, `ghostc` core commands and `pytest` are unaffected;
+# the agent tests skip. Without ANTHROPIC_API_KEY the workflow uses a stub LLM.
+agents = ["langgraph>=1.0", "langsmith>=0.4", "anthropic>=0.40"]
+# Optional: expose ghostc's deterministic capabilities as MCP tools (`ghostc-mcp`).
+mcp = ["mcp>=2.0"]
 
 [project.scripts]
 ghostc = "ghostc.cli:main"
+ghostc-agent = "client_agent.cli:main"
+ghostc-mcp = "ghostc.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -31,4 +44,5 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.setuptools]
-packages = ["ghostc", "ghostc.agents", "ghostc.detect", "ghostc.parsers"]
+packages = ["ghostc", "ghostc.detect", "ghostc.parsers",
+            "bridge", "client_agent", "consultancy_agent"]

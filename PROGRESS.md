@@ -8,11 +8,11 @@ Running status board. Skim this first.
 
 | | |
 |---|---|
-| **Phase** | Full slice shipped: `compile` + `verify` + `baseline` + `eval` + `apply-patch` + `discover` (candidate scoring) + `CHANGELOG.md` + `tests/` (205 pass / 1 skip). No stubs left. |
-| **Last updated** | 2026-08-30 |
+| **Phase** | Full slice shipped (`compile`/`verify`/`baseline`/`eval`/`apply-patch`/`discover`). **Agentic harness in progress:** Phase A (`compile-spec`) + Phase B (`ghostc-agent run-task` — LangGraph client orchestrator, git-based handoff, full loop to a real-repo PR) shipped; agent code reorganised into `bridge`/`client_agent`/`consultancy_agent` + a `ghostc-mcp` server. `tests/` 229 pass / 1 skip. |
+| **Last updated** | 2026-08-31 |
 | **Base fixture** | `hagopj13/node-express-boilerplate` (MIT) cloned at `../node-express-boilerplate` |
-| **Blocked on** | Nothing. (Optional review: ghost prose-casing inconsistency — cosmetic, see Known limits) |
-| **Next action** | External-agent eval harness (the 10+1 tasks + task-pass/approval/latency/cost rows). See `SESSION_TODO.md`. |
+| **Blocked on** | Nothing. (Known: `ghostc/patch.py` audit events use `component: "reverse-compiler"`, not the schema's `reverse_compiler` — pre-existing, fix in Phase F.) |
+| **Next action** | Agentic harness Phase C — real Claude consultancy coding agent (tool-loop + boundary guard) replacing `consultancy_sim.py`. Then D (git hooks), E (docker-compose), F (eval-suite metrics + docs). See `SESSION_TODO.md`. |
 | **Measured win** | `ghostc eval` on the fixture: baseline keyword redaction leaves **28** residual real-entity occurrences (casing-aware detector); `compile` leaves **0**. `ghostc discover` re-finds **13/13** configured entities from code alone and proposes the two unconfigured entities in `adversary.js` (**Meridian 0.99**, **Contoso 0.83**) with **0** OSS-library false positives. Round-trips through `apply-patch` onto a real branch. `CHANGELOG.md` records it. |
 
 ## How to run today
@@ -37,6 +37,45 @@ green from a fresh checkout. `python -m tests.gen_groundtruth` regenerates
 `tests/expected/groundtruth.json` (the leak-metric baseline) if the injected layer changes.
 
 All seven commands are implemented — no stubs left.
+
+### compile-spec / run-task — what it does (agentic harness, in progress)
+
+**`ghostc compile-spec`** (Phase A, shipped): a real implementation task → a sanitized ghost
+`TASK.md`. Deterministic entity substitution via `matching.transform_text` (the *same* engine
+as `compile`), sourced from `privacy.yaml` entities **plus every mapping-store entry** — so a
+task that names *Meridian* becomes a task that names `vendor-e` once `compile --config
+privacy.autoalias.yaml` has frozen that alias. The output is leak-scanned with `anchored_scan`;
+any residual real value is a fail-closed `Rejection` (nothing written, `spec.rejected` audit).
+An LLM may later rephrase the ghost task for fluency but never performs the redaction.
+Modules: `ghostc/agents/spec.py` · `ghostc/agents/state.py`.
+
+**`ghostc-agent run-task`** (Phase B, shipped): the client-side orchestrator as a LangGraph
+`StateGraph` — `plan → compile_spec → [leak gate] → handoff (ghost branch + TASK.md) →
+await_ghost_pr → reverse_patch → verify → consistency → open_real_pr → emit_metrics` (diagram:
+`client_agent/graph.md`, regen with `ghostc-agent print-graph`). `compile_spec` and
+`reverse_patch` are the fail-closed gates; on a `Rejection` the run short-circuits to
+`emit_metrics` and **no real PR is opened**. The client↔consultancy handoff is git-based: the
+client commits `TASK.md` on a `ghostc/task/<id>` branch of a **ghost git remote**; the
+consultancy branches `ghostc/impl/<id>` off it, implements, and opens a **ghost PR** (auth to
+the ghost remote only); that PR's diff is reverse-compiled to a real diff and opened as a
+**real-repo PR** flagged for human review. Remotes are **local bare repos**
+(`bridge.forge.LocalBareForge`, offline/reproducible) behind a `Forge` seam a GitHub `gh`
+backend can slot into; a "PR" is a JSON record + a pushed `refs/ghostc/pr/<id>`. Every node
+emits an audit event (`agent.task_started` … `agent.task_completed`, `agent.metrics`) and the
+metrics row is derived from the log. The consistency gate uses Claude via the `anthropic` SDK
+(`[agents]` extra, `ANTHROPIC_API_KEY`); `--backend stub` (or no key) uses a deterministic stub
+so `pytest` and the eval suite stay offline and reproducible. The Phase B consultancy is a
+deterministic simulator (`consultancy_agent/sim.py`); the real Claude tool-loop + boundary
+guard is Phase C.
+
+**Package split** (2026-08-31): the agent code left `ghostc/`. `ghostc/` = the deterministic
+compiler + `ghostc/spec.py` (`compile_spec`) + `ghostc/mcp_server.py`. `bridge/` = the git
+forge + LLM client (imports neither side). `client_agent/` = the orchestrator (`ghostc-agent`),
+imports `ghostc` + `bridge`. `consultancy_agent/` = the external agent, **may not import
+`ghostc`/`client_agent`** (enforced by `tests/test_boundary.py`). **`ghostc-mcp`**
+(`ghostc/mcp_server.py`) exposes `compile_spec` / `discover` / `verify` / `apply_patch` as MCP
+tools for the LLM-driven planning/consistency steps and external reuse — the graph's fixed
+nodes still call `ghostc.*` in-process. Extras: `[agents]`, `[mcp]`.
 
 ### discover — what it does
 Candidate-scoring detection over the real repo. Two channels per file: a **phrase** scan
@@ -164,6 +203,10 @@ Modules: `ghostc/aliasing.py` · `ghostc/matching.py` · `ghostc/parsers/{treesi
 | 2026-08-30 | `compile` is threshold-driven via the same scan; `detection.auto_alias` (config flag, default **off**) gates minting aliases for unconfigured `auto` candidates. Off → matcher output byte-identical + a review queue; on → mint + transform, `restricted` proposal blocks | User asked for the compiler to "compile whatever hits a certain threshold", configurable on/off. Off-by-default keeps every existing test and the eval number unchanged; on-by-choice neutralises `discover`'s proposals (Meridian → `vendor-e`) |
 | 2026-08-30 | Audit schema gains `discover.candidate_scored` / `compile.candidate_review`; discover/compile hash the surface into `subject.real_sha256` (schema's only free string key) | `discover` runs on the *real* repo, so its events must carry no cleartext — same contract as `compile.entity_detected`. `test_discover.py` asserts no seed real value in the audit file |
 | 2026-08-30 | **`compile` keeps package import specifiers verbatim** (`require`/`import`/`jest.mock` args + `package.json` dependency keys); rewrites only first-party (`./`, `../`, `~`) specifiers. Per-entity `rewrite_imports: true` forces the old behaviour | A renamed dependency (`@vendor-e/flight-sdk`) does not exist on any registry → the ghost fails `yarn install` / throws `MODULE_NOT_FOUND`. Any *resolvable* rewrite (`npm:` alias, `file:` shim) has to name the real package somewhere the ghost can read, which re-leaks it. So: keep it, record it in the ghost spec + audit, let the human decide. Surfaced by the `auto_alias` Meridian run (its whole detection signal is the scoped package) |
+| 2026-08-31 | **Agentic harness = LangGraph client orchestrator + git-based handoff to a separate consultancy process.** Client commits a sanitized `TASK.md` on a `ghostc/task/<id>` branch of a **ghost git remote**; consultancy (ghost-remote auth only) branches off it, implements, opens a **ghost PR**; the client reverse-compiles that PR's diff and opens a **real-repo PR** for human review. Deterministic entity substitution in the spec (`ghostc/agents/spec.py`) reuses `matching.transform_text` + the mapping store; leak-scanned + fail-closed (`spec.rejected`). Remotes are **local bare repos** (`LocalBareForge`) behind a `Forge` seam; a GitHub `gh` backend can replace it without touching the graph | User's design: "a branch and a todo on the ghost branch, todo already sanitized; a hook starts the consultancy dev phase; agent opens a PR to the sanitized repo it has auth for; a real PR with the reversed input opens for real devs". Git-as-the-handoff keeps the two agents in genuinely separate processes/containers with the privacy boundary on the wire, not in one shared function call. Local bare repos keep the whole loop offline + reproducible (green `pytest` from a clean env) |
+| 2026-08-31 | **Agents call Claude through the `anthropic` SDK directly (not `langchain-anthropic`); LangGraph only orchestrates.** New deps (`langgraph`, `langsmith`, `anthropic`) live in an `[agents]` extra; the consistency gate + (Phase C) consultancy agent use Claude when `ANTHROPIC_API_KEY` is set, else a deterministic `StubLLM`. `pytest` for the graph uses `importorskip("langgraph")` + `--backend stub` | `claude-api` skill: use the official SDK, not a wrapper. Keeping the LLM out of the core install + defaulting to a stub off the eval path preserves the reproducibility signal; the eval-suite numbers must not swing run-to-run on model sampling |
+| 2026-08-31 | **Agent code split into top-level packages `bridge` / `client_agent` / `consultancy_agent` (out of `ghostc/agents/`).** `client_agent` imports `ghostc`; `consultancy_agent` may import **only** `bridge` — a `tests/test_boundary.py` static + subprocess check fails if it reaches `ghostc`/`client_agent`. `bridge` (git forge + LLM client) imports neither. `compile_spec` moved to `ghostc/spec.py` (a deterministic `ghostc` capability); `run-task` moved to the `ghostc-agent` entrypoint so `ghostc` proper stays LLM-/langgraph-free | User: name them client/consultancy, not internal/external, and keep them out of `ghostc`. The privacy boundary is the point of the project — making "external can't see the mapping" a module-import rule (matching the Phase-E container split) catches regressions at test time, not in review |
+| 2026-08-31 | **`ghostc` also ships as an MCP server (`ghostc-mcp`, `[mcp]` extra) — hybrid, not full MCP.** Tools `compile_spec` / `discover` / `verify` / `apply_patch`; fail-closed paths return `{"ok": false, ...}`, never a partial ghost. The graph's fixed pipeline nodes keep calling `ghostc.*` in-process | MCP earns its cost where an LLM *chooses* tools (planning / consistency / external reuse — Claude Desktop, Claude Code), not for deterministic orchestration steps that would just gain RPC latency + a server process per test. `mcp` 2.x renamed `FastMCP` → `MCPServer` |
 
 ## In scope (hackathon)
 

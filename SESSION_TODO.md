@@ -1,9 +1,45 @@
-# Session TODO — handoff (updated 2026-08-30)
+# Session TODO — handoff (updated 2026-08-31)
 
 Start-here checklist for the next session. Long-term plan: `TODO.md`. Running status +
 decision log: `PROGRESS.md` (read it first). Memory index: `memory/MEMORY.md`.
 
-## State — the full slice is shipped
+## State — agentic harness Phases A + B shipped (branch `feat/004_agentic_harness`)
+
+Confirmed 6-phase plan for the LangGraph agent workflow (client rewrites a real task into a
+sanitized ghost `TASK.md` → git handoff → consultancy opens a ghost PR → reverse-patch → real
+PR for human review). Two agents, two processes; docker-compose (2 services, LangGraph in the
+client image) is Phase E.
+
+- **Phase A — `ghostc compile-spec`** (`ghostc/spec.py`): real task → sanitized ghost
+  `TASK.md`. Deterministic substitution (reuses `matching.transform_text` + the mapping
+  store), leak-scanned, fail-closed (`spec.rejected`). Tests: `test_spec.py` (7).
+- **Phase B — `ghostc-agent run-task`** (`client_agent/graph.py` + `bridge/{forge,llm}.py` +
+  `consultancy_agent/sim.py`): LangGraph `StateGraph`, `LocalBareForge` (bare-repo remotes +
+  `refs/ghostc/pr/<id>`), Claude-or-stub consistency gate, `agent.*` audit + a metrics row.
+  End-to-end on the fixture opens a real-repo PR with `Northwind Airlines`/`booking-core`
+  restored from the sanitized ghost PR. Diagram: `client_agent/graph.md`.
+  Tests: `test_client_graph.py` (4), `test_forge.py` (6).
+- **Reorg (2026-08-31):** agent code split into `bridge/` (neutral plumbing) +
+  `client_agent/` (imports `ghostc`) + `consultancy_agent/` (**may not** import
+  `ghostc`/`client_agent` — `test_boundary.py`). Entrypoints `ghostc-agent` (run-task,
+  print-graph) + `ghostc-mcp` (MCP tools: compile_spec/discover/verify/apply_patch).
+  Extras `[agents]`, `[mcp]` (`mcp>=2.0`). Working memory is in-repo (`./memory/`,
+  `./CLAUDE.md`) — not `~/.agent/memory.md`.
+- `pytest` → **229 passed, 1 skipped**.
+
+### NEXT — Phase C: real consultancy coding agent
+
+Replace `consultancy_sim.py` with a Claude tool-loop (`list_files`/`read_file`/`write_file`/
+`run_tests`) scoped to a ghost checkout; reads `TASK.md`, implements, commits, opens the ghost
+PR via `Forge`. **Boundary guard**: refuse to start if a mapping-shaped file or a real-repo
+path is reachable. Deterministic scripted mode keyed by task id for the eval fixture. Then
+D (git `post-receive` hooks driving the handoff), E (docker-compose + entrypoints +
+`scripts/agent-e2e.sh`), F (`ghostc run-eval-suite` filling the task-pass/approval/wall-clock/
+token rows + ARCHITECTURE/CHANGELOG/cli.md; also fix `patch.py` `component` string).
+
+---
+
+## Earlier state — the full deterministic slice is shipped
 
 - `pytest` → **205 passed, 1 skipped** (fixture built) / green from a clean checkout.
 - **The anonymizer is `ghostc compile`** — deterministic tree-sitter, node-scoped edits

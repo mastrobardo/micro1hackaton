@@ -76,3 +76,20 @@ On the fixture: baseline leaves **28** residual occurrences, `compile` leaves **
 Every step emits a structured audit event. The eval report is **derived from the audit log**,
 so the Improvement Changelog's evidence and the product's observability feature are the same
 mechanism. Audit events carry `real_sha256`, never the real value.
+
+## Agent workflow packages (Phases A–B; full writeup pending)
+
+The trust boundary is also a **module-import rule**:
+
+| package | side of the boundary | imports | entrypoint |
+|---|---|---|---|
+| `ghostc/` | company | deterministic compiler; `ghostc/spec.py` = `compile_spec`; `ghostc/mcp_server.py` | `ghostc`, `ghostc-mcp` |
+| `bridge/` | neither | git forge (`LocalBareForge`) + LLM client (Claude / stub) | — |
+| `client_agent/` | company | LangGraph orchestrator; imports `ghostc` + `bridge` | `ghostc-agent` |
+| `consultancy_agent/` | external | coding agent; **may import only `bridge`** — `tests/test_boundary.py` fails if it reaches `ghostc`/`client_agent` | — |
+
+The client↔consultancy handoff is a git push to a ghost remote (`bridge.forge`), not a
+function call — so the two agents run as genuinely separate processes/containers with the
+privacy boundary on the wire. `ghostc-mcp` exposes `compile_spec` / `discover` / `verify` /
+`apply_patch` as MCP tools for LLM-driven use; the graph's fixed nodes call `ghostc.*`
+in-process. Diagram: `client_agent/graph.md`.

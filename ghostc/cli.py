@@ -1,7 +1,7 @@
 """ghostc command-line interface.
 
 Implemented:  validate-config, discover, compile, compile-spec, verify, baseline,
-              apply-patch, eval
+              apply-patch, eval   (the LangGraph agent workflow is `ghostc-agent`)
 """
 from __future__ import annotations
 
@@ -141,8 +141,8 @@ def compile_spec(task_path: str, config_path: str, mapping_path: str, out_path: 
     """Compile a real implementation task into a sanitized ghost TASK.md. Fail closed."""
     from pathlib import Path
 
-    from ghostc.agents.spec import Rejection
-    from ghostc.agents.spec import compile_spec as _compile_spec
+    from ghostc.spec import Rejection
+    from ghostc.spec import compile_spec as _compile_spec
 
     try:
         load_config(config_path)
@@ -167,6 +167,10 @@ def compile_spec(task_path: str, config_path: str, mapping_path: str, out_path: 
     else:
         click.echo(spec.summary())
         click.echo(f"  -> {out_path}")
+
+
+# `ghostc run-task` (the LangGraph agent workflow) now lives in `client_agent.cli`
+# as the `ghostc-agent` entrypoint — `ghostc` proper stays LLM-/langgraph-free.
 
 
 @main.command()
