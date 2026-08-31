@@ -2,6 +2,29 @@
 
 Scope: the hackathon slice. Full system is in `TODO.md`.
 
+## This is a reproducibility-first POC
+
+The threat being addressed is **unintentional disclosure** — the hand-redaction that misses a
+casing variant, the agent that quotes a client name in a comment or PR body, a leaked env-var
+name — not a motivated adversary doing structural correlation (see `THREAT_MODEL.md` for where
+that line sits). Reproducibility is how that claim is *proven*: a second person, from a clean
+checkout, runs the baseline, the solution, and the evaluation and reaches the same numbers —
+leak count 0 — offline, deterministically, with no accounts to create. Several components are
+therefore deliberately *simulated* rather than integrated:
+
+| Concern | In this POC | Why |
+|---|---|---|
+| Git forge (PRs, branches, webhooks) | **local bare git repos** (`bridge.forge.LocalBareForge`) + a `post-receive` hook; a "PR" is a JSON record + a pushed ref. CI (`agent-workflow.yml`) additionally publishes the run's branches as **real GitHub PRs** on two throwaway repos. | no account/token/network needed for the offline loop; the CI publish step is opt-in (`GH_PAT` secret) and the repos are disposable |
+| Issue tracker | **spec `.md` files** in `specs/` with a `task-id:` header | judges read the exact input; no Jira/Linear instance to stand up |
+| External coding agent | real Claude **or** a deterministic `--backend stub` | `pytest` and the eval numbers must not move run-to-run on model sampling |
+| CI runner | **GitHub Actions** (`.github/workflows/agent-workflow.yml`) + shell scripts (`scripts/e2e.sh`, `scripts/ci/*`) | the `checks` job is the leak-regression gate; `scripts/*` still run anywhere `bash` + Python exist |
+| Human approval gate | **`decisions.jsonl`** — an append-only review log `ghostc compile --decisions` consumes; written by hand or by the `ghostc-review` Streamlit board (`[review]` extra). A flagged branch + the consistency verdict still gate the merge. | the pipeline consumes a **file**, so the reviewed ghost reproduces without the UI; the same log yields a scorer-vs-human agreement stat |
+
+The pipeline logic — the compiler, the leak scan, the reverse-compile, the audit log, the
+import boundary — is **not** simulated. Only the systems it would plug into are. The section
+[**Where a production integration differs**](#where-a-production-integration-differs) below
+maps each simulation to its real form.
+
 ## Trust boundary
 
 ```
@@ -76,3 +99,46 @@ On the fixture: baseline leaves **28** residual occurrences, `compile` leaves **
 Every step emits a structured audit event. The eval report is **derived from the audit log**,
 so the Improvement Changelog's evidence and the product's observability feature are the same
 mechanism. Audit events carry `real_sha256`, never the real value.
+
+## Agent workflow packages (Phases A–B; full writeup pending)
+
+The trust boundary is also a **module-import rule**:
+
+| package | side of the boundary | imports | entrypoint |
+|---|---|---|---|
+| `ghostc/` | company | deterministic compiler; `ghostc/spec.py` = `compile_spec`; `ghostc/mcp_server.py` | `ghostc`, `ghostc-mcp` |
+| `bridge/` | neither | git forge (`LocalBareForge`) + LLM client (Claude / stub) | — |
+| `client_agent/` | company | LangGraph orchestrator; imports `ghostc` + `bridge` | `ghostc-agent` |
+| `consultancy_agent/` | external | coding agent; **may import only `bridge`** — `tests/test_boundary.py` fails if it reaches `ghostc`/`client_agent` | — |
+
+The client↔consultancy handoff is a git push to a ghost remote (`bridge.forge`), not a
+function call — so the two agents run as genuinely separate processes/containers with the
+privacy boundary on the wire. `ghostc-mcp` exposes `compile_spec` / `discover` / `verify` /
+`apply_patch` as MCP tools for LLM-driven use; the graph's fixed nodes call `ghostc.*`
+in-process. Diagram: `client_agent/graph.md`.
+
+## Where a production integration differs
+
+Everything below is a **swap of the boundary system, not the pipeline**. The compiler,
+mapping store, leak scan, reverse-compiler, audit log, and the `consultancy_agent` import
+rule are unchanged; what changes is what they read from and write to.
+
+| POC shortcut | Production form | What changes concretely |
+|---|---|---|
+| **Ghost / real remotes** are local bare repos; a "PR" is a JSON record + a pushed `refs/ghostc/pr/<id>`. | GitHub / GitLab / Bitbucket via their REST API behind the existing `Forge` seam (`bridge.forge`). | A real PR is opened on the ghost repo and on the real repo. `open_real_pr` posts the reverse-compiled branch **as a pull request**, not a bare branch; the PR description carries the substitution count and the `lossy` flags. Merge is gated by branch protection + `CODEOWNERS`, not by a console message. |
+| **Trigger** is a synchronous `post-receive` hook that runs the consultancy agent in-process; `await_consultancy` then polls the branch once. | A forge **webhook** (`push` / `pull_request`) into a queue; the consultancy agent is a worker that consumes it. The client graph replaces the synchronous wait with a real `interrupt()` resumed by the webhook for the return event. | The two sides no longer need a shared filesystem. Auth becomes a scoped deploy key / token per side — the consultancy's credential can reach **only** the ghost remote. This is the credential-level boundary that the local POC approximates with separate `CONSULTANCY_*` env vars. |
+| **Task source** is a `specs/*.md` file; `task-id:` is hand-authored to be boundary-neutral. | A Jira / Linear issue. An inbound webhook creates the run; `compile_spec` sanitizes the issue body; status transitions (`In Progress` → `In Review`) are written back via the tracker API. | The `task-id` → ghost branch name mapping needs a deterministic, non-reversible derivation from the issue key (the issue key itself may be sensitive). Attachments and comments become additional `compile_spec` inputs. |
+| **Evaluation** is `ghostc eval` run by hand → `workspace/eval-report.md`. | A CI job (GitHub Actions / GitLab CI) that runs `ghostc eval` + `pytest` on every change and publishes the report and `metrics/agent-runs.jsonl` as a **build artifact / status check** — the same way test coverage or a Sonar report is surfaced. | **Shipped** — `.github/workflows/agent-workflow.yml`, job `checks`: `compile`/`verify`/`eval`/`pytest` + `scripts/ci/check_leak_gate.py` (fails on a leak-count regression), eval report + metrics uploaded as artifacts. Job `roundtrip` runs the reduced flow and opens the ghost + real PRs on two throwaway GitHub repos (`publish-prs.sh`); stub backend by default, `claude` via `workflow_dispatch`. Still POC-shaped: the trigger is `push`/dispatch (not a forge webhook) and the demo repos are disposable. |
+| **Human approval** is `decisions.jsonl` (hand-edited or written by the `ghostc-review` board) + a flagged branch + the consistency verdict on stdout. | A required PR review. The `PR-consistency agent` posts its verdict and entity flags as a **review comment**; a `restricted`-entity proposal from `discover` blocks the pipeline until an approver signs off in the tracker/forge, and that sign-off is what `decisions.jsonl` records. | **Partly shipped** — `ghostc-review` (Streamlit, `[review]` extra) writes the append-only log; `ghostc compile --decisions` / `discover --decisions` consume it (restricted clearances + accepted proposals; scorer-vs-human agreement stat). The forge-side move is "the operator reads output" → "the forge won't let merge" — the decision *record* is already externalised. |
+| **Secrets** live in one gitignored `.env` loaded by `bridge.env`. | Per-service secrets from the CI/orchestrator secret store; each side gets only its subset (`CLIENT_*` vs `CONSULTANCY_*`). | `.env` loading already never overrides a var set in the environment, so `docker run -e` / CI secrets / a Vault sidecar drop in without code changes. |
+| **Determinism** via `--backend stub` and local repos. | The stub stays as the CI backend (fast, free, reproducible checks); real Claude runs only in the actual workflow. | The eval suite's numbers stay stable; the live workflow's task-pass-rate / cost / latency rows are populated from `metrics/agent-runs.jsonl` in production, not from the fixture.
+
+**Done:** the workflow runs in CI (`.github/workflows/agent-workflow.yml`) and a reviewer sees
+the **opened PRs** — ghost PR and reverse-compiled real PR — as normal GitHub PR objects on two
+throwaway repos, without executing anything locally. Setup: `scripts/ci/init-demo-repos.sh`
+once, then a `GH_PAT` repo secret. See `GETTING_STARTED.md` §7.
+
+**Next step (planned, not in this submission):** replace the `push` / `workflow_dispatch`
+trigger with a real forge **webhook** + a queue, and the synchronous `post-receive` hook with a
+client-graph `interrupt()`/resume — so the two sides stop sharing a filesystem and the
+consultancy credential is scoped to the ghost remote at the infra layer.

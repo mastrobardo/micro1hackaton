@@ -1,4 +1,16 @@
-# Fixtures — synthetic sensitive-entity layer
+# Fixtures
+
+Two fixtures:
+
+- **`webapp/`** — a **runnable** zero-dependency fullstack app (`fixtures/webapp/README.md`).
+  Used to demo real + ghost side by side in a browser (`./scripts/demo-webapp.sh`). Real +
+  ghost checkouts are staged **outside** this repo at `../ghostc-demo/{real,ghost}`.
+- The **synthetic sensitive-entity layer** below — overlaid on `node-express-boilerplate`
+  → `workspace/real/`, the static corpus for `ghostc discover` / `eval` / the leak metric.
+
+---
+
+# Synthetic sensitive-entity layer
 
 The base repo (`hagopj13/node-express-boilerplate`, MIT) has no client-identifying or
 commercially-sensitive content — real OSS never does. To measure a **leak count** we need a

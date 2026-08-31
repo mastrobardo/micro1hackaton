@@ -56,6 +56,10 @@ class CompileResult:
     hits: int = 0
     entities: dict[str, EntityRoll] = field(default_factory=dict)
     kept_specifiers: list[dict] = field(default_factory=list)  # {file,line,specifier,entity_id,source}
+    # unconfigured surfaces `discover` flagged for review that are therefore still
+    # present verbatim in the ghost. Listed in the ghost spec so the tree explains
+    # itself: they are pending a human decision, not a leak of a *configured* entity.
+    pending_review: list[dict] = field(default_factory=list)  # {surface,score,level,occurrences}
 
     def summary(self) -> str:
         lines = [
@@ -113,6 +117,7 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                  audit_path: str = "workspace/private/audit.jsonl",
                  spec_path: str = "workspace/ghost-spec.md",
                  candidates_path: str = "workspace/private/candidates.jsonl",
+                 decisions_path: str | None = None,
                  detect: bool = True,
                  dry_run: bool = False) -> CompileResult:
     repo_p = Path(repo)
@@ -132,11 +137,21 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
         det = detection_settings(cfg)
         scan = scan_repo(str(repo_p), cfg=cfg, settings=det)
         cfg, minted, blocked = _augment_with_auto_candidates(cfg, scan, det)
-        if blocked:
-            raise SystemExit(
-                "BLOCKED: ghostc discover auto-proposed restricted entity(ies) "
-                f"{', '.join(blocked)} (detection.auto_alias). Add them to "
-                "privacy.yaml with `approved_by:` before compiling.")
+    else:
+        blocked = []
+
+    dec_added: list[str] = []
+    dec_cleared: list[str] = []
+    if decisions_path:
+        cfg, dec_added, dec_cleared = _augment_with_decisions(cfg, scan, decisions_path)
+        approved = {e["id"] for e in cfg.get("entities", []) if e.get("approved_by")}
+        blocked = [b for b in blocked if b not in dec_cleared and b not in approved]
+
+    if blocked:
+        raise SystemExit(
+            "BLOCKED: ghostc discover auto-proposed restricted entity(ies) "
+            f"{', '.join(blocked)} (detection.auto_alias). Clear them in the review "
+            "board (ghostc-review) or add `approved_by:` in privacy.yaml before compiling.")
 
     matchers = build_matchers(cfg)
     ent_meta = {e["id"]: e for e in cfg.get("entities", [])}
@@ -152,10 +167,16 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
 
     audit.emit("run.start", "compiler", details={"repo": str(repo_p), "out": str(out_p),
                                                  "config": config_path, "dry_run": dry_run})
+    if dec_added or dec_cleared:
+        audit.emit("run.start", "compiler", decision="review",
+                   details={"decisions": decisions_path,
+                            "human_entities_added": sorted(dec_added),
+                            "restricted_cleared": sorted(dec_cleared)})
 
     if scan is not None:
         if not dry_run:
             _write_candidates(Path(candidates_path), scan)
+        ignored_keys, surface_key = _reviewer_ignored(decisions_path)
         for c in scan.candidates:
             if c.action != "review":
                 continue
@@ -167,6 +188,15 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                        details={"score": c.score, "evidence": c.evidence,
                                 "configured": c.entity_id is not None,
                                 "occurrences": len(c.occurrences)})
+            # Unconfigured surfaces are never aliased, so they are still in the ghost
+            # verbatim; the spec must say so rather than leave them unexplained. Check
+            # the *post-decisions* config: a candidate a reviewer accepted has just been
+            # promoted to a real entity here and is no longer pending.
+            if c.entity_id is None and c.surface.casefold() not in _configured_surfaces(cfg):
+                result.pending_review.append(
+                    {"surface": c.surface, "score": c.score, "level": c.level,
+                     "occurrences": len(c.occurrences),
+                     "reviewed_ignore": surface_key(c.surface) in ignored_keys})
 
     if not dry_run:
         if out_p.exists():
@@ -353,6 +383,101 @@ def _augment_with_auto_candidates(cfg: dict, scan, settings
     return cfg, minted, blocked
 
 
+def _configured_surfaces(cfg: dict) -> set[str]:
+    """Every spelling the matchers will neutralise, casefolded.
+
+    Used to tell "still in the ghost verbatim" apart from "handled" — including
+    entities that `--decisions` promoted from a review proposal a moment ago.
+    """
+    out: set[str] = set()
+    for e in cfg.get("entities", []):
+        out.add(str(e.get("real", "")).casefold())
+        for m in e.get("match", []):
+            if m.get("kind") in ("literal", "identifier"):
+                out.add(str(m.get("value", "")).casefold())
+    out.discard("")
+    return out
+
+
+def _reviewer_ignored(decisions_path: str | None):
+    """`(ignored surface keys, surface_key fn)` from the review log — empty without one."""
+    from ghostc.review.store import surface_key
+    if not decisions_path or not Path(decisions_path).exists():
+        return set(), surface_key
+    from ghostc.review.store import DecisionStore
+    return DecisionStore(Path(decisions_path)).ignored_keys(), surface_key
+
+
+def _augment_with_decisions(cfg: dict, scan, decisions_path: str
+                            ) -> tuple[dict, list[str], list[str]]:
+    """Apply the human review log (`ghostc-review` → `decisions.jsonl`):
+
+    * an **accepted** decision for an unconfigured surface becomes a
+      ``source: human`` entity so the matcher pipeline neutralises it;
+    * an **accepted** decision carrying ``approved_by`` for an existing
+      ``restricted`` entity sets ``approved_by`` on it (the human clearance).
+
+    No file / no accepted decisions → ``cfg`` unchanged. Returns
+    ``(cfg, added_ids, cleared_ids)``.
+    """
+    from ghostc.review.store import DecisionStore, surface_key
+
+    p = Path(decisions_path)
+    if not p.exists():
+        return cfg, [], []
+    accepted = DecisionStore(p).accepted()
+    if not accepted:
+        return cfg, [], []
+
+    cfg = copy.deepcopy(cfg)
+    by_id = {e["id"]: e for e in cfg.get("entities", [])}
+    taken = {e.get("ghost", "") for e in cfg.get("entities", [])}
+    ids = set(by_id)
+    cand_by_key = {}
+    for c in (scan.candidates if scan is not None else []):
+        cand_by_key[c.entity_id or surface_key(c.surface)] = c
+
+    added: list[str] = []
+    cleared: list[str] = []
+    for rec in accepted:
+        eid = rec.get("entity_id")
+        if eid and eid in by_id:
+            e = by_id[eid]
+            if (e.get("level") == "restricted" and rec.get("approved_by")
+                    and not e.get("approved_by")):
+                e["approved_by"] = rec["approved_by"]
+                cleared.append(eid)
+            continue
+        if not eid or eid in ids:
+            continue
+        c = cand_by_key.get(rec["key"])
+        kind = getattr(c, "kind", None) or "vendor"
+        strategy = _KIND_STRATEGY.get(kind, "semantic_alias")
+        ghost = rec.get("ghost") or ("" if strategy == "remove"
+                                     else _next_alias(taken, _KIND_PREFIX.get(kind, "vendor")))
+        taken.add(ghost)
+        ids.add(eid)
+        ent = {
+            "id": eid, "real": rec["surface"], "kind": kind,
+            "level": rec.get("level") or getattr(c, "level", None) or "confidential",
+            "strategy": strategy, "ghost": ghost, "source": "human",
+            "note": f"accepted in review by {rec.get('approved_by') or 'reviewer'}",
+        }
+        if rec.get("approved_by"):
+            ent["approved_by"] = rec["approved_by"]
+        match = []
+        if c is not None:
+            for a in dict.fromkeys([*c.aliases, *[o.surface for o in c.occurrences]]):
+                if a and a != rec["surface"]:
+                    m_kind = "identifier" if _TOKENISH.match(a) and " " not in a else "literal"
+                    match.append({"kind": m_kind, "value": a})
+        if match:
+            ent["match"] = match[:24]
+        cfg["entities"].append(ent)
+        added.append(eid)
+    return cfg, added, cleared
+
+
 def _dedup_occ(occ: list[dict]) -> list[dict]:
     seen, out = set(), []
     for o in sorted(occ, key=lambda o: (o["file"], o["line"])):
@@ -425,6 +550,39 @@ acceptable for this ghost.
 | specifier | occurrences |
 |-----------|-------------|
 {rows2}
+"""
+    if result.pending_review:
+        rows3 = "\n".join(
+            f"| `{c['surface']}` | {c['score']:.2f} | {c['level']} | {c['occurrences']} | "
+            + ("reviewer chose **ignore**" if c.get("reviewed_ignore") else "**undecided**")
+            + " |"
+            for c in sorted(result.pending_review, key=lambda c: -c["score"])
+        )
+        undecided = [c for c in result.pending_review if not c.get("reviewed_ignore")]
+        verdict = (f"**{len(undecided)} of these are still undecided — treat this ghost as "
+                   "not cleared for release.**" if undecided else
+                   "Every surface here was reviewed and deliberately left as-is.")
+        spec += f"""
+## Surfaces present verbatim — not configured entities
+
+`ghostc discover` scored these as probably sensitive, but they are **not configured
+entities**, so nothing was aliased and they appear in this ghost **unchanged**. That is
+deliberate: an unconfigured surface is *proposed*, never silently renamed
+(`detection.auto_alias` is off by default). A surface a reviewer accepted is not listed
+here — it became a real entity and was aliased like any other.
+
+{verdict}
+
+| surface | score | level | occurrences | status |
+|---------|-------|-------|-------------|--------|
+{rows3}
+
+Resolve them, then recompile:
+
+```bash
+ghostc-review -- --candidates <candidates.jsonl> --decisions review/decisions.jsonl
+ghostc compile --repo <real> --config <config> --decisions review/decisions.jsonl
+```
 """
     spec_p.parent.mkdir(parents=True, exist_ok=True)
     spec_p.write_text(spec, encoding="utf-8")

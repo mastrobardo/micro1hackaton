@@ -1,0 +1,190 @@
+"""Spec compiler — a real implementation task -> a sanitized *ghost* task.
+
+Turns a real task ("add a new endpoint for Meridian") into a ghost task ("add a
+new endpoint for vendor-e") that is safe to hand to the external consultancy
+agent. Entity substitution is **deterministic**: it reuses the same matcher /
+casing engine as ``ghostc compile`` (:mod:`ghostc.matching`), sourced from
+``privacy.yaml`` *and* every entry already in the mapping store (so discovered
+entities such as Meridian are covered once frozen).
+
+The output is then **leak-scanned** with :func:`ghostc.scanning.anchored_scan`
+over every real spelling we know about. Any residual real value is a fail-closed
+:class:`Rejection` — nothing is written, a ``spec.rejected`` audit event is
+emitted, and the ghost task never crosses the boundary. An LLM may rephrase the
+ghost task afterwards for fluency, but it never performs the redaction.
+
+This is a ``ghostc`` capability (no LLM, no network): used directly by
+``ghostc compile-spec``, by the ``client_agent`` graph, and exposed as an MCP
+tool by :mod:`ghostc.mcp_server`.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ghostc.audit import AuditLog, hash_real, new_operation_id
+from ghostc.config import load_config
+from ghostc.mapping import MappingStore
+from ghostc.matching import build_matchers, transform_text
+from ghostc.scanning import anchored_scan
+
+
+class Rejection(Exception):
+    """Raised when a real value survives into the ghost task. Nothing is written."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+    def __str__(self) -> str:
+        return f"{self.reason}: {self.detail}" if self.detail else self.reason
+
+
+@dataclass
+class Substitution:
+    entity_id: str
+    ghost: str
+    kind: str
+    level: str
+    count: int
+
+    def to_dict(self) -> dict:
+        return {"entity_id": self.entity_id, "ghost": self.ghost, "kind": self.kind,
+                "level": self.level, "count": self.count}
+
+
+@dataclass
+class GhostSpec:
+    operation_id: str
+    real_task: str                       # boundary-internal — never written ghost-side
+    ghost_task: str                      # sanitized — safe to cross the boundary
+    substitutions: list[Substitution] = field(default_factory=list)
+
+    def summary(self) -> str:
+        if not self.substitutions:
+            return "spec compiled: 0 substitutions (task mentioned no known entity)"
+        rows = "\n".join(
+            f"  {s.ghost:<16} {s.kind:<16} {s.level:<12} x{s.count}"
+            for s in sorted(self.substitutions, key=lambda s: (s.level, s.ghost))
+        )
+        return f"spec compiled: {len(self.substitutions)} entity(ies) substituted\n{rows}"
+
+
+def _merged_entities(cfg: dict, store: MappingStore) -> list[dict]:
+    """`privacy.yaml` entities + one synthetic entity per mapping-only entry.
+
+    Config entities carry their ``match[]`` rules (extra spellings, acronyms);
+    mapping-only entries (e.g. an entity ``ghostc discover`` proposed and
+    ``compile --config privacy.autoalias.yaml`` aliased) are reconstructed from
+    the frozen store so the spec compiler stays in step with the code compiler.
+    """
+    ents = [dict(e) for e in cfg.get("entities", [])]
+    have = {e["id"] for e in ents}
+    for entry in store.data.get("entries", []):
+        if entry["entity_id"] in have:
+            continue
+        ents.append({
+            "id": entry["entity_id"],
+            "kind": entry["kind"],
+            "level": entry["level"],
+            "strategy": entry["strategy"],
+            "real": entry["real"],
+            "ghost": entry["ghost"],
+        })
+    return ents
+
+
+def _known_real_spellings(entities: list[dict]) -> list[str]:
+    out: list[str] = []
+    for e in entities:
+        if e.get("real"):
+            out.append(e["real"])
+        for m in e.get("match", []):
+            if m["kind"] in ("literal", "identifier"):
+                out.append(m["value"])
+    return sorted(set(out), key=len, reverse=True)
+
+
+def render_task_md(operation_id: str, spec: GhostSpec, *, mapping_version: int) -> str:
+    """The sanitized ``TASK.md`` committed onto the ghost branch. No real values."""
+    if spec.substitutions:
+        rows = "\n".join(
+            f"| `{s.ghost or '<removed>'}` | {s.kind} | {s.level} | {s.count} |"
+            for s in sorted(spec.substitutions, key=lambda s: (s.level, s.ghost))
+        )
+        alias_table = (
+            "\n## Aliases in play\n\n"
+            "These are stable ghost aliases. Do not try to \"resolve\" them — implement "
+            "against them as-is.\n\n"
+            "| alias | kind | level | mentions |\n"
+            "|-------|------|-------|----------|\n"
+            f"{rows}\n"
+        )
+    else:
+        alias_table = ""
+
+    return f"""# Ghost task
+
+_Generated by `ghostc compile-spec` (operation `{operation_id}`, mapping v{mapping_version})._
+_Sanitized: every real client / vendor / internal-service / infrastructure name has been
+replaced with a stable ghost alias. Implement against the **ghost repository only** and open
+a PR against it — the change is translated back to the real repository automatically._
+
+---
+
+{spec.ghost_task.strip()}
+{alias_table}"""
+
+
+def compile_spec(real_task: str, *, config_path: str = "privacy.yaml",
+                 mapping_path: str = "workspace/private/mapping.json",
+                 audit_path: str = "workspace/private/audit.jsonl",
+                 operation_id: str | None = None,
+                 out_path: str | None = None) -> GhostSpec:
+    """Compile *real_task* into a sanitized :class:`GhostSpec`. Fail closed."""
+    cfg = load_config(config_path)
+    store = MappingStore(mapping_path, cfg.get("mapping_version", 1))
+    entities = _merged_entities(cfg, store)
+    matchers = build_matchers({"entities": entities})
+
+    op = operation_id or new_operation_id()
+    audit = AuditLog(audit_path, op)
+
+    ghost_task, hits = transform_text(real_task, "comment", matchers)
+
+    meta = {e["id"]: e for e in entities}
+    counts: dict[str, int] = {}
+    for h in hits:
+        if not getattr(h, "kept", False):
+            counts[h.entity_id] = counts.get(h.entity_id, 0) + 1
+    subs = [
+        Substitution(eid, meta[eid].get("ghost", ""), meta[eid]["kind"],
+                     meta[eid]["level"], n)
+        for eid, n in sorted(counts.items())
+    ]
+
+    # fail-closed gate: no real spelling may survive into the ghost task
+    residual = anchored_scan(ghost_task, _known_real_spellings(entities))
+    if residual:
+        leaked = sorted({hash_real(r.text) for r in residual})
+        audit.emit("spec.rejected", "spec_compiler", decision="block",
+                   subject={"file": out_path} if out_path else None,
+                   details={"residual_sha256": leaked, "count": len(residual)})
+        raise Rejection(
+            "real value survived spec compilation",
+            f"{len(residual)} residual occurrence(s); ghost task not emitted")
+
+    audit.emit("spec.compiled", "spec_compiler",
+               subject={"file": out_path} if out_path else None,
+               details={"substitutions": [s.to_dict() for s in subs],
+                        "real_sha256": hash_real(real_task)})
+
+    spec = GhostSpec(operation_id=op, real_task=real_task, ghost_task=ghost_task,
+                     substitutions=subs)
+    if out_path:
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_text(
+            render_task_md(op, spec, mapping_version=store.data["mapping_version"]),
+            encoding="utf-8")
+    return spec

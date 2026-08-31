@@ -54,6 +54,54 @@ many-to-one so reverse can't recover word count / prose casing. Flagged `lossy` 
 `PatchResult.lossy_entities` + the audit; the pipeline's PR-consistency + human review gate is
 downstream. Same limitation as open question 1 (ghost prose casing).
 
+`_translate` pass **1b** (added 2026-08-31): the space-separated display renderings of a
+multi-segment alias — `Vendor A`, `VENDOR A` (how `compile` writes a display literal like
+"SkyRoute Data Ltd") — are exact-substituted to `real` before the segment splice, which can't
+see across a space. Without it a comment/prose line the consultancy wrote using the ghost
+display name would carry a ghost alias into the real PR (real leak, not just cosmetic). Still
+lossy on the *other* direction (env-var underscoring `COMPANYX`↔`COMPANY_X`, `id:'companyx'`↔
+`'CompanyX'`) — consistent within the file so the code builds/tests, human-gate catches the
+spelling.
+
+## `reverse_apply` — handoff/base-anchored reverse (added 2026-08-31, used by `open-real-pr`)
+
+`reverse_patch` (above) rebuilds the real diff by token-translating **every** line incl.
+context; forward `compile` is not a perfect token-level involution
+(`SKYROUTE_API_KEY`→`VENDOR_A_API_KEY`→reverse `SKY_ROUTE_API_KEY`) so translated context
+drifts and `git apply` rejects the hunk. This blocked the live E2E's return leg (`config.js`,
+`server.js`, `.env.example`).
+
+`ghostc.patch.reverse_apply(ghost_diff, mapping_path, *, ghost_at, real_at, …)` fixes it:
+forward `compile` is **line-preserving** (rewrites tokens *within* a line, never adds/removes
+lines), so ghost line N at the handoff commit ≡ real line N at the PR base. It parses the
+consultancy's unified diff (`_parse_unified` → `_FileDiff`/`_Hunk`) and:
+
+- **new file** → translate added lines + path wholesale (unchanged; this half always worked);
+- **deleted file** → drop;
+- **modified file** → `_apply_hunks(real_base_lines, hunks, render_add=tr)` — context and `-`
+  lines come **verbatim from the real pre-image by position**, only `+` lines are
+  token-translated. Result applies by construction.
+- **line-count mismatch** (multi-line string edit; rare) → fallback: translate the
+  reconstructed ghost-impl file wholesale, name it in `ReverseApplyResult.fallbacks` (PR body
+  + metrics flag it "review closely").
+
+Returns `ReverseApplyResult{files: dict[realpath, str|None], entities_resolved, lossy_entities,
+n_files, n_hunks, fallbacks}` — concrete file contents, **not a patch**. `client_agent/
+reverse_pr.py` writes them straight into the `ghostc/real/<name>` branch (no `git apply` gate —
+the tree is built, not patched). Same fail-closed `_check_ghost_diff` gate as `reverse_patch`
+(leak / unmapped alias / version / dup). `ghost_at` = `git show <handoff>:p`, `real_at` =
+`git show <base>:p`.
+
+`reverse_patch` (textual) is untouched — still used by the full `ghostc-agent run-task` graph
+(`reverse_patch_node`) + `tests/test_apply_patch.py`. New: `tests/test_reverse_pr.py` covers
+`reverse_apply` via `open-real-pr`.
+
+**Verified live 2026-08-31:** spec → ghost `TASK.md` (4 subs, no real names) → consultancy
+(real Claude, ghost-only, 8 files, **7/7 ghost tests + build green**) → `open-real-pr` →
+`ghostc/real/001-add-companyx-integration`: 8 files, 13 hunks, **0 ghost aliases in the diff**
+(leak-scan clean), real names restored (`CompanyX`×31, `SkyRoute Data Ltd`, `booking-core`),
+**7/7 real tests + build green**, 0 fallbacks.
+
 ## Changelog
 
 `CHANGELOG.md` at the repo root — evidence-linked, rows = capability milestones (baseline 28 →

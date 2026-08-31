@@ -3,7 +3,8 @@
 > **micro1 Agentic Workflows Hackathon submission.**
 > An agent workflow that lets external AI coding agents (Codex, Copilot, Claude) implement real
 > tasks on a private codebase **without any sensitive information crossing the company trust
-> boundary** — and proves it with a fair baseline and an evidence-linked changelog.
+> boundary** — reducing the surface for **unintentional** disclosure and proving it with a fair
+> baseline and an evidence-linked changelog.
 
 ## Who has this problem
 
@@ -38,7 +39,7 @@ task text
 ```
 
 See `ARCHITECTURE.md` for component contracts, `THREAT_MODEL.md` for the trust boundary and
-known limitations, `TODO.md` for the full long-term roadmap, and `PROGRESS.md` for current status.
+known limitations, `TODO.md` for the full long-term roadmap, and `docs/PROGRESS.md` for current status.
 
 ## Primary metric
 
@@ -53,7 +54,9 @@ Keyword `sed` redaction to `REDACTED` + the same external agent + the same 10 ta
 "simple script" / "manual process people use today" baseline. `CHANGELOG.md` records each
 iteration from that baseline to the final workflow, with evidence.
 
-## Reproduction (fills in as subcommands land)
+## Reproduction
+
+Full guide, including runtimes and costs: **`GETTING_STARTED.md`**.
 
 ```bash
 # 1. base fixture (MIT, offline — no external accounts)
@@ -63,9 +66,9 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 ./fixtures/apply.sh
 
 # 3. env
-python -m venv .venv && . .venv/bin/activate && pip install -e .
+python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 
-# 4. pipeline  (all 7 subcommands implemented)
+# 4. pipeline
 ghostc discover --repo workspace/real --config privacy.yaml   # score + propose sensitive entities
 ghostc compile  --repo workspace/real --config privacy.yaml --out workspace/ghost
 ghostc verify   --ghost workspace/ghost --mapping workspace/private/mapping.json
@@ -74,12 +77,101 @@ ghostc baseline --repo workspace/real --config privacy.yaml   # fair comparator 
 ghostc eval     --real workspace/real --config privacy.yaml   # -> workspace/eval-report.{md,csv}
 ```
 
-**Current result** (`ghostc eval` on the fixture): keyword-redaction baseline leaves **28**
-residual real-entity occurrences in what an external agent would see; `ghostc compile` leaves
-**0**, and the ghost PR round-trips back to a real branch through `ghostc apply-patch`.
-`ghostc discover` re-finds all 13 configured entities from code alone and proposes the two
-unconfigured ones seeded in `adversary.js` (Meridian, Contoso) with no OSS-library false
-positives. Full evidence trail: `CHANGELOG.md` + `workspace/eval-report.md`.
+### Runnable demo — real + ghost in two browser windows
+
+```bash
+./scripts/demo-webapp.sh    # stage real -> compile ghost -> verify -> npm test both -> serve
+# real  http://localhost:3000  → Northwind Airlines / SkyRoute Data Ltd / booking-core
+# ghost http://localhost:3001  → Client A / Vendor A / service-a          (same UI, same tests)
+```
+
+A zero-dependency Node app (`fixtures/webapp/`) staged **outside** this repo at
+`../ghostc-demo/{real,ghost}`. Same endpoints, same passing tests, sensitive names aliased.
+
+**Current result** (`ghostc eval` on the fixture): scored over **13 cases** — one per
+sensitive entity, same fixture and same scan for both approaches — the keyword-redaction
+baseline is clean on **7/13** and leaves **28** residual real-entity occurrences in what an
+external agent would see; `ghostc compile` is clean on **13/13**, leaving **0**. The hard case
+is `vendor_skyroute` (29 occurrences across code, config, env-var names, hostnames and prose;
+the baseline leaves 11 of them). The ghost PR round-trips back to a real branch through
+`ghostc apply-patch`. `ghostc discover` re-finds all 13 configured entities from code alone and
+proposes the two unconfigured ones seeded in `adversary.js` (Meridian, Contoso) with no
+OSS-library false positives.
+
+Evidence trail: `CHANGELOG.md` (Improvement Changelog) · `workspace/eval-report.md` +
+`workspace/eval-report-cases.csv` (per-case results) · `trajectories/` (one per agent).
+
+## Agent trajectories
+
+`trajectories/` — deliverable 04, one per agent, each readable from the agent's instructions
+through to its final result. **Generated from the run logs**, not written from memory:
+
+```bash
+scripts/make-trajectories.py     # audit.jsonl + metrics/agent-runs.jsonl -> trajectories/*.md
+```
+
+Worth a look: a genuine **fail-closed block and its retry** (the reverse-compiled diff did not
+apply to a real repo that had moved on, so the run stopped and recorded `rejected` rather than
+forcing the patch), and the **verification loop** that refuses the coding agent's `done: true`
+until `run_tests` and `run_build` have both returned `exit=0` since its last write.
+
+## Agent workflow (`ghostc-agent`, `ghostc-mcp`)
+
+The LangGraph client orchestrator lives in `client_agent/` (`ghostc-agent run-task`); the
+external coding agent in `consultancy_agent/` (may not import `ghostc` — enforced by
+`tests/test_boundary.py`); shared git/LLM plumbing in `bridge/`. Needs the extras:
+
+```bash
+pip install -e ".[agents,mcp]"
+cp .env.example .env                                  # ANTHROPIC_API_KEY, LANGSMITH_*, backend/model
+ghostc-agent run-task --task task.md --backend stub   # full loop -> a real-repo PR
+ghostc-agent print-graph                              # regenerate client_agent/graph.md
+```
+
+`.env` (gitignored, template `.env.example`) is the one config source — loaded by
+`bridge.env.load_env`, never overriding a var already set in the shell / CI / `docker run -e`.
+With no Anthropic key the workflow uses the deterministic stub backend. Point elsewhere with
+`GHOSTC_ENV_FILE`.
+
+**Per-agent credentials.** The two agents — `client` (orchestrator) and `consultancy`
+(external coder) — resolve each secret role-first then shared:
+`CLIENT_ANTHROPIC_API_KEY` / `CONSULTANCY_ANTHROPIC_API_KEY` → `ANTHROPIC_API_KEY`, same for
+`*_LANGSMITH_API_KEY` / `*_LANGSMITH_PROJECT` / `*_LANGSMITH_ENDPOINT`. One shared key works;
+split them for separate billing, LangSmith trace projects (`ghostc-client` /
+`ghostc-consultancy`), and blast radius. Phase E's `docker compose` hands each service only
+its own subset.
+
+**Monitoring.** Set `LANGSMITH_API_KEY` (+ `LANGSMITH_TRACING=true`) and every run is traced
+— LangGraph nodes, the wrapped Anthropic calls, and explicit `@traceable` spans
+(`bridge.trace`) on `run_task` / each node / `*.complete` / the consultancy entry. If your
+key is in LangSmith's **EU** tenant, also set
+`LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` (a US default + an EU key → `403`).
+
+**CI.** `.github/workflows/agent-workflow.yml` — job `checks` runs `compile`/`verify`/`eval`
+/`pytest` and **fails on a leak-count regression** (`scripts/ci/check_leak_gate.py`); job
+`roundtrip` runs the reduced flow with the stub consultancy and opens the **ghost PR** and the
+**reverse-compiled real PR** on two throwaway GitHub repos, so a reviewer inspects normal forge
+objects without running anything. `workflow_dispatch` can pick `consultancy_backend: claude`.
+Setup: `GETTING_STARTED.md` §7.
+
+**Human review board.** `ghostc-review` (Streamlit, `[review]` extra) — a reviewer accepts /
+ignores / escalates `discover` proposals and clears `restricted` entities into an append-only
+`decisions.jsonl`. `ghostc compile --decisions <path>` / `discover --decisions` consume that
+file (restricted clearances + accepted proposals), so the reviewed ghost reproduces without
+the UI; the same log yields a scorer-vs-human agreement stat (Process-data tab). Seeded
+example: `fixtures/decisions.example.jsonl`. Details: `GETTING_STARTED.md` §8.
+
+### Poking the MCP server
+
+`ghostc-mcp` exposes `compile_spec` / `discover` / `verify` / `apply_patch` as MCP tools.
+Test it interactively with the MCP Inspector (needs Node; first run downloads it):
+
+```bash
+npx @modelcontextprotocol/inspector ghostc-mcp
+#   or:  npx @modelcontextprotocol/inspector python -m ghostc.mcp_server
+```
+
+Run it from the repo root — the tools take filesystem paths resolved against the server's CWD.
 
 ## What pre-existed vs. what we added (ground rule 02)
 
