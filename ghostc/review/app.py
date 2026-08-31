@@ -143,7 +143,9 @@ def _run_app(argv: list[str]) -> None:
 
         st.subheader("Agent runs · `metrics/agent-runs.jsonl`")
         mrows = _jsonl(a.metrics)
-        st.dataframe(mrows, use_container_width=True, hide_index=True) if mrows else \
+        if mrows:
+            st.dataframe(mrows, use_container_width=True, hide_index=True)
+        else:
             st.info("no agent-run metrics yet")
 
         st.subheader("Eval report · `eval-report.csv`")
@@ -160,8 +162,10 @@ def _run_app(argv: list[str]) -> None:
         ev: dict[str, int] = {}
         for e in _jsonl(a.audit):
             ev[e.get("event", "?")] = ev.get(e.get("event", "?"), 0) + 1
-        st.dataframe([{"event": k, "count": v} for k, v in sorted(ev.items())],
-                     use_container_width=True, hide_index=True) if ev else \
+        if ev:
+            st.dataframe([{"event": k, "count": v} for k, v in sorted(ev.items())],
+                         use_container_width=True, hide_index=True)
+        else:
             st.info("no audit log yet")
 
 
