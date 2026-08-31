@@ -2,6 +2,29 @@
 
 Scope: the hackathon slice. Full system is in `TODO.md`.
 
+## This is a reproducibility-first POC
+
+The threat being addressed is **unintentional disclosure** — the hand-redaction that misses a
+casing variant, the agent that quotes a client name in a comment or PR body, a leaked env-var
+name — not a motivated adversary doing structural correlation (see `THREAT_MODEL.md` for where
+that line sits). Reproducibility is how that claim is *proven*: a second person, from a clean
+checkout, runs the baseline, the solution, and the evaluation and reaches the same numbers —
+leak count 0 — offline, deterministically, with no accounts to create. Several components are
+therefore deliberately *simulated* rather than integrated:
+
+| Concern | In this POC | Why |
+|---|---|---|
+| Git forge (PRs, branches, webhooks) | **local bare git repos** (`bridge.forge.LocalBareForge`) + a `post-receive` hook; a "PR" is a JSON record + a pushed ref | no GitHub/GitLab account, token, or network needed; the loop is byte-for-byte repeatable |
+| Issue tracker | **spec `.md` files** in `specs/` with a `task-id:` header | judges read the exact input; no Jira/Linear instance to stand up |
+| External coding agent | real Claude **or** a deterministic `--backend stub` | `pytest` and the eval numbers must not move run-to-run on model sampling |
+| CI runner | shell scripts (`scripts/e2e.sh`, `scripts/demo-webapp.sh`) | run anywhere `bash` + Python exist |
+| Human approval gate | a **flagged branch** + the consistency-agent verdict in the run output | keeps the consequential action (merge) behind a person without a review UI |
+
+The pipeline logic — the compiler, the leak scan, the reverse-compile, the audit log, the
+import boundary — is **not** simulated. Only the systems it would plug into are. The section
+[**Where a production integration differs**](#where-a-production-integration-differs) below
+maps each simulation to its real form.
+
 ## Trust boundary
 
 ```
@@ -93,3 +116,23 @@ function call — so the two agents run as genuinely separate processes/containe
 privacy boundary on the wire. `ghostc-mcp` exposes `compile_spec` / `discover` / `verify` /
 `apply_patch` as MCP tools for LLM-driven use; the graph's fixed nodes call `ghostc.*`
 in-process. Diagram: `client_agent/graph.md`.
+
+## Where a production integration differs
+
+Everything below is a **swap of the boundary system, not the pipeline**. The compiler,
+mapping store, leak scan, reverse-compiler, audit log, and the `consultancy_agent` import
+rule are unchanged; what changes is what they read from and write to.
+
+| POC shortcut | Production form | What changes concretely |
+|---|---|---|
+| **Ghost / real remotes** are local bare repos; a "PR" is a JSON record + a pushed `refs/ghostc/pr/<id>`. | GitHub / GitLab / Bitbucket via their REST API behind the existing `Forge` seam (`bridge.forge`). | A real PR is opened on the ghost repo and on the real repo. `open_real_pr` posts the reverse-compiled branch **as a pull request**, not a bare branch; the PR description carries the substitution count and the `lossy` flags. Merge is gated by branch protection + `CODEOWNERS`, not by a console message. |
+| **Trigger** is a synchronous `post-receive` hook that runs the consultancy agent in-process; `await_consultancy` then polls the branch once. | A forge **webhook** (`push` / `pull_request`) into a queue; the consultancy agent is a worker that consumes it. The client graph replaces the synchronous wait with a real `interrupt()` resumed by the webhook for the return event. | The two sides no longer need a shared filesystem. Auth becomes a scoped deploy key / token per side — the consultancy's credential can reach **only** the ghost remote. This is the credential-level boundary that the local POC approximates with separate `CONSULTANCY_*` env vars. |
+| **Task source** is a `specs/*.md` file; `task-id:` is hand-authored to be boundary-neutral. | A Jira / Linear issue. An inbound webhook creates the run; `compile_spec` sanitizes the issue body; status transitions (`In Progress` → `In Review`) are written back via the tracker API. | The `task-id` → ghost branch name mapping needs a deterministic, non-reversible derivation from the issue key (the issue key itself may be sensitive). Attachments and comments become additional `compile_spec` inputs. |
+| **Evaluation** is `ghostc eval` run by hand → `workspace/eval-report.md`. | A CI job (GitHub Actions / GitLab CI) that runs `ghostc eval` + `pytest` on every change and publishes the report and `metrics/agent-runs.jsonl` as a **build artifact / status check** — the same way test coverage or a Sonar report is surfaced. | No logic change; the report becomes a gate. A regression in leak count fails the check. `metrics/agent-runs.jsonl` is already shaped as one row per run for exactly this. |
+| **Human approval** is a flagged branch + the consistency verdict printed to stdout. | A required PR review. The `PR-consistency agent` posts its verdict and entity flags as a **review comment**; a `restricted`-entity proposal from `discover` blocks the pipeline until an approver signs off in the tracker/forge. | The gate moves from "the operator reads the output" to "the forge won't let the merge button work". |
+| **Secrets** live in one gitignored `.env` loaded by `bridge.env`. | Per-service secrets from the CI/orchestrator secret store; each side gets only its subset (`CLIENT_*` vs `CONSULTANCY_*`). | `.env` loading already never overrides a var set in the environment, so `docker run -e` / CI secrets / a Vault sidecar drop in without code changes. |
+| **Determinism** via `--backend stub` and local repos. | The stub stays as the CI backend (fast, free, reproducible checks); real Claude runs only in the actual workflow. | The eval suite's numbers stay stable; the live workflow's task-pass-rate / cost / latency rows are populated from `metrics/agent-runs.jsonl` in production, not from the fixture.
+
+**Next step (planned, not in this submission):** run the workflow inside CI so a reviewer sees
+the **opened PRs** — ghost PR and reverse-compiled real PR — as normal forge objects, without
+needing to execute anything locally. The Actions/webhook wiring is the following iteration.

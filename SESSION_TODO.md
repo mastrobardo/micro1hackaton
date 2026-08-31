@@ -1,4 +1,4 @@
-# Session TODO — handoff (updated 2026-08-31, end of session 5)
+# Session TODO — handoff (updated 2026-08-31, end of session 7)
 
 Start-here checklist for the next session. Running status + decision log: **`PROGRESS.md`
 (read first)**. Durable notes: `memory/` (index `memory/MEMORY.md`). Long-term plan:
@@ -6,6 +6,78 @@ Start-here checklist for the next session. Running status + decision log: **`PRO
 
 `pytest` → **268 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
 Branch: `feat/006_reverse-pr-and-metrics`.
+
+---
+
+## NEXT SESSION — wire the workflow into CI
+
+**Goal:** a reviewer (judge) sees the workflow's output as **opened pull requests** on a real
+forge — the ghost PR and the reverse-compiled real PR — as normal forge objects. They will
+**not** be expected to run the Actions themselves; the PRs (+ the eval report / metrics as a
+build artifact or status check) are the deliverable they inspect.
+
+Scope for that session (nothing built yet):
+- A GitHub Actions workflow (or equivalent) that runs `ghostc compile` + `client-agent start`
+  + `client-agent open-real-pr` on a push / manual dispatch, using `--consultancy-backend
+  stub` for the deterministic CI path (real Claude behind a secret + `workflow_dispatch` input
+  for a live run).
+- Swap `bridge.forge.LocalBareForge` for a GitHub backend behind the existing `Forge` seam so
+  the ghost/real branches become **actual PRs** (see `ARCHITECTURE.md` →
+  "Where a production integration differs" — that table is the spec for this work).
+- Publish `workspace/eval-report.md` + `metrics/agent-runs.jsonl` as workflow artifacts;
+  fail the job on a leak-count regression.
+- Keep `pytest` + `ghostc eval` green offline — the stub backend stays the default CI backend.
+
+Decision to confirm at the top of that session: which forge (a throwaway GitHub repo under the
+user's account vs. a self-hosted Gitea) and whether the real-Claude run is in-CI or a
+documented local step whose PR is pushed.
+
+## SESSION AFTER CI — human review board (Streamlit), MVP
+
+Confirmed with the user (session 7): **MVP scope, its own session, after CI.**
+
+The human approval gate today = hand-editing `approved_by:` / entities into `privacy.yaml`
+(`ghostc/config.py::entities_needing_approval`, `compile.py` blocks on unapproved `restricted`
+proposals). Replace that with a real reviewer UI whose decisions also become process-tuning
+data.
+
+MVP:
+- **`ghostc/review/store.py`** — append-only `decisions.jsonl`: one record per surface/entity
+  (proposed action vs reviewer action, level, `approved_by`, note, ts, op-id; latest
+  supersedes, history kept = revision). Plus `summarize()` = scorer-vs-human agreement.
+- **`ghostc-review`** Streamlit app (`[review]` optional extra; core + `pytest` untouched):
+  **Review** tab (`candidates.jsonl` table — score, signal badges, occurrences; per row
+  accept→entity+level+approver / ignore / escalate-to-restricted → writes `decisions.jsonl`,
+  shows the implied `privacy.yaml` delta) + **Process data** tab (render
+  `metrics/agent-runs.jsonl` + `eval-report.csv` + audit-event counts + the agreement stat;
+  read-only).
+- **`ghostc compile` / `discover` gain `--decisions <path>`**; `compile` reads restricted
+  clearances + accepted proposals from it. No file → today's behavior (backward compatible).
+  New `review.decision_recorded` audit event.
+- **`fixtures/decisions.example.jsonl`** seeded — a judge reproduces the ghost WITHOUT running
+  Streamlit; the app is how decisions are *made*, the file is what the pipeline consumes.
+- Tests: store round-trip; `compile` honors decisions (restricted cleared → runs; absent →
+  blocks); `importorskip("streamlit")`, app logic in a testable module.
+- Docs: README + `GETTING_STARTED.md` "Human review board" section; `ARCHITECTURE.md`
+  "Where a production integration differs" row (local Streamlit → forge/tracker review queue);
+  `VIDEO_SCRIPT.md` beat (already foreshadowed in the hot-take).
+
+Stretch / later: a PR-consistency approval tab (real diff + verdict + new-entity flags →
+approve / request-changes, no auto-merge); an explicit "raise `review_threshold` to X"
+suggestion from the aggregated decisions.
+
+### DONE session 7 — submission docs
+
+Four docs created (no code touched):
+- **`GETTING_STARTED.md`** — the reproduction guide (clean env → baseline → solution → eval →
+  agent workflow; expected output, runtime, cost, troubleshooting). Deliverable 02.
+- **`OVERVIEW.md`** — one-page project intro (problem / why hard / what it does / the 28→0
+  number / status).
+- **`VIDEO_SCRIPT.md`** — ≤5-min solution-video script, two-column (screen / narration), with
+  a "record these first" checklist. Deliverable 03 prep.
+- **`ARCHITECTURE.md`** — restructured: new "This is a reproducibility-first POC" intro + a
+  "Where a production integration differs" table (forge/PRs, webhooks vs hook, Jira, CI eval
+  gate, human approval, secrets). All prior component-contract content kept.
 
 ---
 

@@ -3,7 +3,8 @@
 > **micro1 Agentic Workflows Hackathon submission.**
 > An agent workflow that lets external AI coding agents (Codex, Copilot, Claude) implement real
 > tasks on a private codebase **without any sensitive information crossing the company trust
-> boundary** — and proves it with a fair baseline and an evidence-linked changelog.
+> boundary** — reducing the surface for **unintentional** disclosure and proving it with a fair
+> baseline and an evidence-linked changelog.
 
 ## Who has this problem
 
