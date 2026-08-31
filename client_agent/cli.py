@@ -36,10 +36,15 @@ _WEBAPP_AUDIT = ".ghostc/webapp-private/audit.jsonl"
 _AGENT_WORKSPACE = ".ghostc/agent"          # full pipeline only (synthesized forge)
 
 
-def _resolve_spec(name_or_path: str) -> tuple[str, str]:
-    """(text, spec_id) for a spec given as a bare name, a path, or '-' (stdin)."""
+def _resolve_spec(name_or_path: str) -> tuple[str, str, str]:
+    """(text, spec_id, stem) for a spec given as a bare name, a path, or '-' (stdin).
+
+    ``spec_id`` is the boundary-neutral ``task-id:`` (→ ghost branch name); ``stem``
+    is the real spec filename (the human's descriptive name, used to derive the
+    *decoded* real-repo branch).
+    """
     if name_or_path == "-":
-        return click.get_text_stream("stdin").read(), "spec-stdin"
+        return click.get_text_stream("stdin").read(), "spec-stdin", "spec-stdin"
     p = Path(name_or_path)
     if not p.exists() and p.parent == Path("."):
         cand = Path(_SPECS_DIR) / name_or_path
@@ -48,7 +53,7 @@ def _resolve_spec(name_or_path: str) -> tuple[str, str]:
         raise SystemExit(f"spec not found: {name_or_path} (looked in ./ and ./{_SPECS_DIR}/)")
     text = p.read_text(encoding="utf-8")
     m = re.search(r"task-id:\s*([A-Za-z0-9._-]+)", text)
-    return text, (m.group(1) if m else p.stem)
+    return text, (m.group(1) if m else p.stem), p.stem
 
 
 @click.group()
@@ -78,9 +83,12 @@ def main() -> None:
 @click.option("--backend", type=click.Choice(["auto", "claude", "stub"]),
               default="auto", show_default=True,
               help="LLM backend for the consistency gate. auto: Claude if a key is set.")
+@click.option("--metrics-file", default=None, type=click.Path(),
+              help="Per-run metrics JSONL sink (default: metrics/agent-runs.jsonl "
+                   "or $GHOSTC_METRICS_FILE).")
 def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree: str,
                  config_path: str, mapping_path: str, audit_path: str, workspace: str,
-                 backend: str) -> None:
+                 backend: str, metrics_file: str | None) -> None:
     """Run one task: real task -> ghost branch + TASK.md -> ghost PR -> reverse-patch ->
     real-repo PR (human review). Fail closed."""
     try:
@@ -100,7 +108,8 @@ def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree
 
     state = run_task(text, task_id=tid, real_repo=real_repo, ghost_tree=ghost_tree,
                      config_path=config_path, mapping_path=mapping_path,
-                     audit_path=audit_path, workspace=workspace, backend=backend)
+                     audit_path=audit_path, workspace=workspace, backend=backend,
+                     metrics_file=metrics_file)
 
     m = state.get("metrics", {})
     if state.get("rejected"):
@@ -144,11 +153,15 @@ def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree
 @click.option("--consultancy-backend", type=click.Choice(["auto", "claude", "stub"]),
               default="stub", show_default=True,
               help="Backend the post-receive hook runs the consultancy agent with.")
+@click.option("--metrics-file", default=None, type=click.Path(),
+              help="Per-run metrics JSONL sink (default: metrics/agent-runs.jsonl "
+                   "or $GHOSTC_METRICS_FILE). The post-receive hook forwards it so the "
+                   "consultancy writes into the same sink.")
 @click.option("--task-id", default=None, help="Override the id derived from the spec.")
 def start_cmd(spec: str, full: bool, config_path: str, ghost_tree: str, real_repo: str,
               mapping_path: str, audit_path: str, consultancy_repo: str | None,
               workspace: str, backend: str, consultancy_backend: str,
-              task_id: str | None) -> None:
+              metrics_file: str | None, task_id: str | None) -> None:
     """Drive a spec file through the workflow: real task -> sanitized TASK.md on a ghost
     feature branch -> post-receive hook -> consultancy develops the branch (no PR)."""
     try:
@@ -162,14 +175,14 @@ def start_cmd(spec: str, full: bool, config_path: str, ghost_tree: str, real_rep
     except ConfigError as exc:
         raise SystemExit(f"INVALID CONFIG\n{exc}")
 
-    text, spec_id = _resolve_spec(spec)
+    text, spec_id, _stem = _resolve_spec(spec)
     tid = task_id or spec_id
 
     state = run_task(text, task_id=tid, real_repo=real_repo, ghost_tree=ghost_tree,
                      config_path=config_path, mapping_path=mapping_path,
                      audit_path=audit_path, workspace=workspace, backend=backend,
                      consultancy_backend=consultancy_backend,
-                     consultancy_repo=consultancy_repo,
+                     consultancy_repo=consultancy_repo, metrics_file=metrics_file,
                      stop_after=None if full else "develop")
 
     m = state.get("metrics", {})
@@ -195,7 +208,75 @@ def start_cmd(spec: str, full: bool, config_path: str, ghost_tree: str, real_rep
         click.echo(f"  authors on the branch: {', '.join(authors)}")
     click.echo(f"  substitutions: {m.get('substitutions')}   wall-clock: {m.get('wall_clock_s')}s")
     click.echo(f"  inspect:  git -C {ghost} log --stat {branch}")
-    click.echo("  no PR (reduced flow) — run with --full for the whole pipeline")
+    click.echo("  no PR (reduced flow) — run `client-agent open-real-pr <spec>` to "
+               "reverse-compile the consultancy's work onto the real repo")
+
+
+@main.command("open-real-pr")
+@click.argument("spec")
+@click.option("--config", "config_path", default=_WEBAPP_CONFIG, show_default=True,
+              type=click.Path())
+@click.option("--ghost-tree", default=_WEBAPP_GHOST, show_default=True, type=click.Path(),
+              help="Ghost repo whose ghostc/task/<id> branch the consultancy developed.")
+@click.option("--real-repo", default=_WEBAPP_REAL, show_default=True, type=click.Path())
+@click.option("--mapping", "mapping_path", default=_WEBAPP_MAPPING, show_default=True,
+              type=click.Path())
+@click.option("--audit", "audit_path", default=_WEBAPP_AUDIT, show_default=True,
+              type=click.Path())
+@click.option("--task-id", default=None, help="Ghost branch id (default: from the spec).")
+@click.option("--real-branch", default=None,
+              help="Override the decoded real-repo branch name "
+                   "(default: ghostc/real/<spec-name reverse-compiled through the mapping>).")
+@click.option("--base", default=None, help="Base branch on the real repo (default: its HEAD).")
+@click.option("--metrics-file", default=None, type=click.Path(),
+              help="Per-run metrics JSONL sink (default: metrics/agent-runs.jsonl "
+                   "or $GHOSTC_METRICS_FILE).")
+def open_real_pr_cmd(spec: str, config_path: str, ghost_tree: str, real_repo: str,
+                     mapping_path: str, audit_path: str, task_id: str | None,
+                     real_branch: str | None, base: str | None,
+                     metrics_file: str | None) -> None:
+    """Simulate the forge webhook: reverse-compile the consultancy's ghost-branch
+    implementation and open a decoded branch on the real repo for human review.
+
+    Run this AFTER `client-agent start <spec>` (the consultancy must have developed
+    `ghostc/task/<id>`). Fail-closed: on a reverse-patch rejection nothing is
+    written to the real repo.
+    """
+    try:
+        from client_agent.reverse_pr import NotReady, open_real_pr
+        from ghostc.patch import Rejection
+    except ImportError as exc:
+        raise SystemExit("the agent workflow needs the [agents] extra:\n"
+                         f"  pip install -e '.[agents]'\n  ({exc})")
+
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    _text, spec_id, stem = _resolve_spec(spec)
+    tid = task_id or spec_id
+
+    try:
+        row = open_real_pr(task_id=tid, spec_slug=stem, config_path=config_path,
+                           ghost_tree=ghost_tree, real_repo=real_repo,
+                           mapping_path=mapping_path, audit_path=audit_path,
+                           real_branch=real_branch, base=base, metrics_file=metrics_file)
+    except NotReady as exc:
+        raise SystemExit(f"NOT READY: {exc}\n  run `client-agent start {spec}` first")
+    except Rejection as rej:
+        raise SystemExit(f"REJECTED (fail closed): {rej}\n"
+                         "  nothing written to the real repo (metrics + audit recorded)")
+
+    click.echo(f"real branch opened: {row['real_branch']}   (in {row['real_repo']})")
+    click.echo(f"  reverse-compiled from: {row['ghost_branch']}  "
+               f"commit {row['real_commit'][:10]} (ghostc-client)")
+    click.echo(f"  entities resolved: {row['entities_resolved'] or []}   "
+               f"lossy: {row['lossy_entities'] or []}")
+    click.echo(f"  translated: {row['files']} file(s), {row['hunks']} hunk(s)   "
+               f"wall-clock: {row['wall_clock_s']}s")
+    click.echo(f"  inspect:  git -C {row['real_repo']} log --stat {row['real_branch']}")
+    click.echo("  -> HUMAN REVIEW REQUIRED before merge (see PR_BODY.md on the branch)")
 
 
 @main.command("print-graph")
@@ -235,6 +316,12 @@ def print_graph(out: str) -> None:
         "`handoff` commits + `git push -f origin` on `../ghostc-demo/ghost`; the bare "
         "origin's `post-receive` hook runs the consultancy agent against its own "
         "clone; `await_consultancy` fetches the branch back. No forge, no PR.\n\n"
+        "The reverse-compile back to the real repo is a **separate** command, "
+        "`client-agent open-real-pr <spec>` (`client_agent/reverse_pr.py`) — run after "
+        "the consultancy has developed the ghost branch. It is not a graph node: it "
+        "simulates a forge webhook firing into the company boundary "
+        "(`git diff <handoff>..origin/ghostc/task/<id>` → `reverse_patch` → a decoded "
+        "`ghostc/real/<name>` branch on `../ghostc-demo/real`).\n\n"
         f"```mermaid\n{graph_mermaid(reduced=True)}\n```\n\n"
         f"{nodes_table}", encoding="utf-8")
     click.echo(f"wrote {out}")

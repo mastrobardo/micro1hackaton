@@ -225,6 +225,66 @@ action = live-verify Claude + LangSmith for `role="client"` **and** `role="consu
 projects, two keys), then C3 (`npm test`/`build` metrics). Full checklist: `SESSION_TODO.md`
 → `## DONE session 4`.
 
+## `client-agent open-real-pr` + per-run metrics — shipped session 5 (2026-08-31)
+
+Branch `feat/006_reverse-pr-and-metrics`. `pytest` **268 pass / 1 skip**. Docs/live-demo
+pending (see `SESSION_TODO.md`).
+
+**The reverse-compile "webhook" is a SEPARATE client subcommand, not wired into `start`.**
+User's steer: the consultancy already puts its code on the ghost task branch opened by the
+client; we need *another* command, on the client/ghost agent, to open a decoded ("clear")
+branch on the **real** repo — simulating a forge webhook that fires *into* the company
+boundary. It **must** be client-side: reversing needs the cleartext mapping + `ghostc`, both
+of which `consultancy_agent` is walled off from (`tests/test_boundary.py`).
+
+- **`client_agent/reverse_pr.py`** (new) — `open_real_pr(*, task_id, spec_slug, config_path,
+  ghost_tree, real_repo, mapping_path, audit_path, ghost_branch=None, real_branch=None,
+  base=None, metrics_file=None, scratch_dir=".ghostc/scratch") -> dict` (the metrics row).
+  `@traceable("client.open_real_pr")`, `role="client"`.
+  1. `git -C <ghost> fetch origin`; `_handoff_commit` = the commit that ADDED `TASK.md` on
+     `origin/ghostc/task/<id>` (`git log --diff-filter=A -- TASK.md`, oldest).
+  2. `git diff <handoff>..origin/<branch> -- . :(exclude)TASK.md :(exclude)IMPL_NOTES.md`
+     = the consultancy's ghost impl delta (workflow artifacts excluded). Empty → `NotReady`.
+  3. `ghostc.patch.reverse_patch(..., do_apply=False)` → real diff. **Fail-closed**: on
+     `Rejection` → `agent.real_pr_blocked` audit + `outcome="rejected"` metrics row, re-raise
+     (nothing on the real repo). `reverse_patch` also renames sensitive path components
+     (`src/serviceAProbe.js` → `src/bookingCoreProbe.js`).
+  4. On `<real_repo>`: `checkout -B ghostc/real/<decoded> <base>`, `git apply --check` (`--3way`
+     then plain), apply, write `PR_BODY.md` (entities resolved / lossy / "HUMAN REVIEW
+     REQUIRED"), commit as `ghostc-client` (`localgit.CLIENT_IDENT`), `checkout <base>`.
+     Emits `agent.real_pr_opened` + `approval.requested`.
+- **Decoded branch name** = `ghostc/real/<decode_slug(spec_filename_stem, mapping)>`.
+  `decode_slug` token-replaces each ghost kebab alias → `kebab(real)` (longest alias first,
+  `(?<![a-z0-9])…(?![a-z0-9])`). `add-partner-a-integration` → `add-companyx-integration`;
+  a slug with no alias is unchanged. `--real-branch` overrides. **Note:** the spec header
+  `task-id:` is the boundary-neutral *ghost* branch id; the real branch is derived from the
+  descriptive *filename* instead (`_resolve_spec` now returns `(text, spec_id, stem)`).
+- **CLI**: `client-agent open-real-pr <spec>` in `client_agent/cli.py` — webapp defaults
+  (`../ghostc-demo/{ghost,real}`, `fixtures/webapp/privacy.webapp.yaml`,
+  `.ghostc/webapp-private/mapping.json`); `--task-id/--real-branch/--base/--metrics-file`.
+  `NotReady` → "run `client-agent start <spec>` first"; `Rejection` → exit 1, nothing written.
+
+**Per-run metrics sink — `bridge/metrics.py`** (stdlib only → both agents may import it).
+`record_run(row, *, path=None)` appends one JSON line `{schema:1, ts, **row}` to
+`metrics(path)` = `path` arg → `$GHOSTC_METRICS_FILE` → `metrics/agent-runs.jsonl`.
+Gitignored (`metrics/*.jsonl`); `metrics/README.md` + `.gitkeep` tracked — consumed as a
+CI/dashboard artifact "like tests or sonar reports" (dashboard is later, maybe a GH Action).
+
+- **Who writes a row** (`role`): `client` — `emit_metrics` node (`command` `start` reduced /
+  `run-task` full) **and** `open-real-pr`; `consultancy` — `agent.run()` at the end
+  (`task_branch`, `backend`, `steps`, `files_changed`, `wall_clock_s`).
+- **Hook forwarding**: `run_task` resolves `metrics_path(metrics_file).resolve()` to an
+  absolute path and passes it to `localgit.ensure_ghost_origin(..., metrics_file=)`, which
+  bakes `GHOSTC_METRICS_FILE=…; export …` into the `post-receive` script — so the consultancy
+  (cwd = bare repo, spawned by the hook) writes into the **same** file as the client.
+- **Tests**: `tests/test_metrics.py` (4), `tests/test_reverse_pr.py` (4 — decode_slug,
+  happy-path decoded branch on the real repo, `NotReady`, fail-closed on a real value in the
+  ghost diff). `tests/conftest.py::_hermetic_agent_env` now `setenv`s `GHOSTC_METRICS_FILE`
+  to a per-test tmp file (no repo pollution; tests read it from `os.environ`).
+  `tests/test_agentic_e2e.py` asserts a `client` + a `consultancy` row in the shared sink.
+- Threaded `metrics_file` param: `run_task` / `build_client_graph` / `_install_post_receive`
+  / `ensure_ghost_origin` (all default `None`/`""` → no behaviour change when unset).
+
 ## Known / deferred
 
 - `ghostc/patch.py` audit events use `component: "reverse-compiler"` (hyphen) — **not** the

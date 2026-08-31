@@ -29,12 +29,17 @@ _AGENT_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_agent_env(monkeypatch):
+def _hermetic_agent_env(monkeypatch, tmp_path):
     """Every test runs as if there were no `.env` and no ambient agent credentials:
     point `GHOSTC_ENV_FILE` at nothing and strip the agent env vars. Tests that
     exercise env loading / key resolution set their own `GHOSTC_ENV_FILE` + vars
-    (their monkeypatch wins — it is applied after this one)."""
+    (their monkeypatch wins — it is applied after this one).
+
+    `GHOSTC_METRICS_FILE` is redirected to a per-test tmp file so agent runs never
+    touch the repo's real `metrics/agent-runs.jsonl`; a test that asserts on
+    metrics reads it from `os.environ["GHOSTC_METRICS_FILE"]`."""
     monkeypatch.setenv("GHOSTC_ENV_FILE", str(REPO_ROOT / "tests" / ".nonexistent.env"))
+    monkeypatch.setenv("GHOSTC_METRICS_FILE", str(tmp_path / "agent-metrics.jsonl"))
     for var in _AGENT_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
     try:  # reset load_env()'s memo so a prior test's load does not leak

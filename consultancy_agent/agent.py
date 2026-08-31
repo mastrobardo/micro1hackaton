@@ -42,6 +42,7 @@ from pathlib import Path
 
 from bridge.env import load_env
 from bridge.llm import StubLLM, configure_langsmith, get_llm
+from bridge.metrics import record_run
 from bridge.trace import traceable
 
 _MAX_STEPS = 24
@@ -206,6 +207,7 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     load_env()
     configure_langsmith(role="consultancy")          # -> project ghostc-consultancy
     llm = get_llm(backend, role="consultancy")       # -> CONSULTANCY_ANTHROPIC_API_KEY
+    started = time.time()
 
     root = Path(repo)
     _git(root, "fetch", "-q", "origin")
@@ -230,5 +232,13 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     sha = _git(root, "rev-parse", "HEAD").strip()
     _git(root, "push", "-q", "origin", branch)        # GHOSTC_NO_HOOK is set by the hook
 
-    return RunResult(branch=branch, commit=sha, files_changed=len(changed),
-                     backend=getattr(llm, "model", backend), steps=steps, summary=summary)
+    result = RunResult(branch=branch, commit=sha, files_changed=len(changed),
+                       backend=getattr(llm, "model", backend), steps=steps, summary=summary)
+    # one metrics row per agent run — GHOSTC_METRICS_FILE is exported by the hook so
+    # this lands in the same sink as the client's rows (bridge/metrics.py).
+    record_run({"role": "consultancy", "command": "start", "flow": "develop",
+                "task_branch": branch, "backend": result.backend, "steps": steps,
+                "files_changed": len(changed), "outcome": "ok",
+                "summary": summary[:200], "commit": sha,
+                "wall_clock_s": round(time.time() - started, 3)})
+    return result

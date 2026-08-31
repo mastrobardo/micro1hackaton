@@ -19,6 +19,10 @@ workspace/
 # (mapping = real values, audit). workspace/ is deprecated — see memory/workspace-deprecated.md
 .ghostc/
 
+# --- Agent run metrics (generated; consumed as a CI/dashboard artifact) ---
+# metrics/README.md + metrics/.gitkeep are tracked; the JSONL sink is not.
+metrics/*.jsonl
+
 # --- Secrets (ground rule 08) ---
 # note: *.env.example / .env.example ARE tracked — placeholders only, no real values
 .env

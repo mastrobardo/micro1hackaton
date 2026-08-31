@@ -72,6 +72,12 @@ def _events(audit_path: str) -> list[str]:
             for l in Path(audit_path).read_text(encoding="utf-8").splitlines() if l.strip()]
 
 
+def _metric_rows() -> list[dict]:
+    p = Path(os.environ["GHOSTC_METRICS_FILE"])          # redirected per-test by conftest
+    return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] \
+        if p.exists() else []
+
+
 def test_reduced_flow_hook_develops_the_ghost_branch(bench):
     ghost = bench["ghost"]
     state = run_task(TASK, task_id="healthz", backend="stub",
@@ -111,6 +117,18 @@ def test_reduced_flow_hook_develops_the_ghost_branch(bench):
               "agent.consultancy_developed", "agent.metrics", "agent.task_completed"):
         assert e in ev, f"missing audit event {e}"
     assert "agent.real_pr_opened" not in ev and "agent.ghost_pr_opened" not in ev
+
+    # every agent run appends one row to the shared metrics sink — the client's
+    # consolidated row plus the consultancy's own (via the post-receive hook, which
+    # exports GHOSTC_METRICS_FILE so both write to the same file)
+    rows = _metric_rows()
+    by_role = {r["role"] for r in rows}
+    assert by_role == {"client", "consultancy"}
+    client_row = next(r for r in rows if r["role"] == "client")
+    assert client_row["command"] == "start" and client_row["flow"] == "reduced"
+    assert client_row["outcome"] == "ok" and client_row["task_id"] == "healthz"
+    cons_row = next(r for r in rows if r["role"] == "consultancy")
+    assert cons_row["task_branch"] == "ghostc/task/healthz" and cons_row["outcome"] == "ok"
 
 
 def test_reduced_flow_is_idempotent_and_leak_free(bench):

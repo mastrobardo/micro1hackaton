@@ -40,6 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from bridge.forge import LocalBareForge
 from bridge.env import load_env
 from bridge.llm import configure_langsmith, get_llm
+from bridge.metrics import metrics_path, record_run
 from bridge.trace import traceable
 from client_agent import localgit
 from client_agent.state import TaskState, new_state
@@ -113,7 +114,7 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
                        mapping_path: str, audit_path: str, real_repo: str,
                        ghost_tree: str, consultancy_repo: str, scratch: Path,
                        backend: str, consultancy_fn: ConsultancyFn,
-                       reduced: bool = False):
+                       reduced: bool = False, metrics_file: str | None = None):
     llm = get_llm(backend, role="client")
     mapping_version = MappingStore(mapping_path).data.get("mapping_version", 1)
 
@@ -289,6 +290,11 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
                    decision="rejected" if state.get("rejected") else "ok",
                    details={"task_id": state["task_id"],
                             "rejected": state.get("rejected")})
+        record_run({"role": "client",
+                    "command": "start" if reduced else "run-task",
+                    "flow": "reduced" if reduced else "full",
+                    "outcome": "rejected" if state.get("rejected") else "ok", **m},
+                   path=metrics_file)
         return {"metrics": m}
 
     nodes = [("plan", plan), ("compile_spec", compile_spec_node), ("handoff", handoff)]
@@ -345,6 +351,7 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
              stop_after: str | None = None,
              consultancy_backend: str = "stub",
              consultancy_repo: str | None = None,
+             metrics_file: str | None = None,
              scratch_dir: str = ".ghostc/scratch") -> TaskState:
     """Run one task through the client workflow. Returns the final state.
 
@@ -380,6 +387,9 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
     configure_langsmith(role="client")
     audit = AuditLog(audit_path, new_operation_id())
 
+    # absolute so the consultancy (run from the hook, cwd = bare repo) writes here too
+    mf_abs = str(metrics_path(metrics_file).resolve())
+
     if reduced:
         import sys
 
@@ -388,12 +398,13 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
         ghost_repo = Path(ghost_tree).resolve()
         cons_repo = Path(consultancy_repo or ghost_repo.parent / "ghost-consultancy").resolve()
         localgit.ensure_ghost_origin(ghost_repo, cons_repo,
-                                     hook_backend=consultancy_backend, python=sys.executable)
+                                     hook_backend=consultancy_backend, python=sys.executable,
+                                     metrics_file=mf_abs)
         graph = build_client_graph(
             forge=None, audit=audit, config_path=config_path, mapping_path=mapping_path,
             audit_path=audit_path, real_repo=real_repo, ghost_tree=str(ghost_repo),
             consultancy_repo=str(cons_repo), scratch=scratch, backend=backend,
-            consultancy_fn=consultancy_fn, reduced=True)
+            consultancy_fn=consultancy_fn, reduced=True, metrics_file=mf_abs)
         return graph.invoke(new_state(task_id, real_task))
 
     # --- full pipeline: synthesized forge over throwaway bare repos ---------
@@ -412,5 +423,5 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
         forge=forge, audit=audit, config_path=config_path, mapping_path=mapping_path,
         audit_path=audit_path, real_repo=real_repo, ghost_tree=ghost_tree,
         consultancy_repo="", scratch=scratch, backend=backend,
-        consultancy_fn=consultancy_fn, reduced=False)
+        consultancy_fn=consultancy_fn, reduced=False, metrics_file=mf_abs)
     return graph.invoke(new_state(task_id, real_task))

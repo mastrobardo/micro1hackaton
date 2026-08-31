@@ -45,6 +45,8 @@ graph TD;
 
 `handoff` commits + `git push -f origin` on `../ghostc-demo/ghost`; the bare origin's `post-receive` hook runs the consultancy agent against its own clone; `await_consultancy` fetches the branch back. No forge, no PR.
 
+The reverse-compile back to the real repo is a **separate** command, `client-agent open-real-pr <spec>` (`client_agent/reverse_pr.py`) — run after the consultancy has developed the ghost branch. It is not a graph node: it simulates a forge webhook firing into the company boundary (`git diff <handoff>..origin/ghostc/task/<id>` → `reverse_patch` → a decoded `ghostc/real/<name>` branch on `../ghostc-demo/real`).
+
 ```mermaid
 ---
 config:

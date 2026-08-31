@@ -1,10 +1,42 @@
-# Session TODO — handoff (updated 2026-08-31, end of session 4)
+# Session TODO — handoff (updated 2026-08-31, end of session 5)
 
 Start-here checklist for the next session. Running status + decision log: **`PROGRESS.md`
 (read first)**. Durable notes: `memory/` (index `memory/MEMORY.md`). Long-term plan:
 `TODO.md`. Conventions + "memory stays in-repo": `CLAUDE.md`.
 
-`pytest` → **260 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
+`pytest` → **268 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
+Branch: `feat/006_reverse-pr-and-metrics`.
+
+---
+
+## DONE session 5 — `client-agent open-real-pr` + per-run metrics
+
+Code complete + green; **not yet run live** against `../ghostc-demo/`.
+
+- **`client-agent open-real-pr <spec>`** (`client_agent/reverse_pr.py`) — the SEPARATE
+  reverse-compile "webhook", run *after* `client-agent start`. `git diff
+  <handoff>..origin/ghostc/task/<id>` (consultancy impl, minus `TASK.md`/`IMPL_NOTES.md`) →
+  `ghostc.patch.reverse_patch` → decoded `ghostc/real/<name>` branch on `../ghostc-demo/real`
+  (+ `PR_BODY.md`, commit as `ghostc-client`). Branch name = spec **filename** run through
+  `decode_slug` (ghost alias → `kebab(real)`). Client-side only (needs the cleartext mapping
+  + `ghostc`). Fail-closed on `Rejection`. `--real-branch/--base/--task-id/--metrics-file`.
+- **`bridge/metrics.py`** — `record_run(row, *, path=None)` appends one JSON line to
+  `metrics/agent-runs.jsonl` (`$GHOSTC_METRICS_FILE` / `--metrics-file` override). Gitignored
+  (`metrics/*.jsonl`); `metrics/README.md` + `.gitkeep` tracked. Rows: `role=client` from
+  `emit_metrics` (`start`/`run-task`) + `open-real-pr`; `role=consultancy` from `agent.run()`.
+  The `post-receive` hook exports `GHOSTC_METRICS_FILE` (threaded `run_task` →
+  `ensure_ghost_origin` → `_install_post_receive`) so the consultancy writes the same sink.
+- Tests: `tests/test_metrics.py` (4), `tests/test_reverse_pr.py` (4); `test_agentic_e2e.py`
+  asserts both roles' rows; `conftest::_hermetic_agent_env` redirects `GHOSTC_METRICS_FILE`
+  to a per-test tmp file.
+- `_resolve_spec` now returns `(text, spec_id, stem)`.
+
+**Next for this slice:** live demo — `./fixtures/webapp/apply.sh` → `ghostc compile` →
+`client-agent start 001-add-companyx-integration --consultancy-backend claude` →
+`client-agent open-real-pr 001-add-companyx-integration` → check
+`git -C ../ghostc-demo/real log --stat ghostc/real/001-add-companyx-integration` +
+`cat metrics/agent-runs.jsonl`. Optional: a `scripts/dashboard.*` that renders the JSONL
+(the "GitHub Action like tests/sonar" idea) — deferred, user said "later".
 
 ---
 
@@ -86,6 +118,10 @@ ghostc compile --repo ../ghostc-demo/real --config fixtures/webapp/privacy.webap
   --candidates .ghostc/webapp-private/candidates.jsonl
 client-agent start 001-add-companyx-integration --consultancy-backend claude
 git -C ../ghostc-demo/ghost log --stat ghostc/task/001-add-second-provider   # inspect (two actors)
+
+client-agent open-real-pr 001-add-companyx-integration                        # session-5: the "webhook"
+git -C ../ghostc-demo/real log --stat ghostc/real/001-add-companyx-integration
+cat metrics/agent-runs.jsonl                                                  # one row per agent run
 ```
 
 Bare origin + consultancy clone are created on first run; re-runs are idempotent

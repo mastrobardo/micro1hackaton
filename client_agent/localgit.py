@@ -45,12 +45,17 @@ def default_branch(repo: Path) -> str:
 
 
 def _install_post_receive(bare: Path, consultancy_repo: Path, *,
-                          hook_backend: str, python: str) -> None:
+                          hook_backend: str, python: str, metrics_file: str = "") -> None:
     hook = Path(bare) / "hooks" / "post-receive"
     hook.parent.mkdir(parents=True, exist_ok=True)
+    # Export GHOSTC_METRICS_FILE so the consultancy agent (spawned by _hook) appends
+    # its own run row to the SAME sink as the client — see bridge/metrics.py.
+    metrics_line = (f'GHOSTC_METRICS_FILE="{metrics_file}"; export GHOSTC_METRICS_FILE\n'
+                    if metrics_file else "")
     hook.write_text(
         "#!/bin/sh\n"
         '[ -n "$GHOSTC_NO_HOOK" ] && exit 0\n'
+        f"{metrics_line}"
         f'exec "{python}" -m consultancy_agent._hook '
         f'"{hook_backend}" "{Path(consultancy_repo).resolve()}"\n',
         encoding="utf-8")
@@ -58,7 +63,7 @@ def _install_post_receive(bare: Path, consultancy_repo: Path, *,
 
 
 def ensure_ghost_origin(ghost_repo: Path, consultancy_repo: Path, *,
-                        hook_backend: str, python: str) -> Path:
+                        hook_backend: str, python: str, metrics_file: str = "") -> Path:
     """Idempotent local "git server" setup. Returns the bare-origin path.
 
     * a bare ``<ghost_repo>.git`` beside the ghost repo, wired as its ``origin``;
@@ -80,7 +85,8 @@ def ensure_ghost_origin(ghost_repo: Path, consultancy_repo: Path, *,
         git(ghost_repo, "remote", "add", "origin", str(bare))
         git(ghost_repo, "push", "-q", "-u", "origin", default_branch(ghost_repo))
 
-    _install_post_receive(bare, consultancy_repo, hook_backend=hook_backend, python=python)
+    _install_post_receive(bare, consultancy_repo, hook_backend=hook_backend,
+                          python=python, metrics_file=metrics_file)
 
     if (consultancy_repo / ".git").is_dir():
         git(consultancy_repo, "fetch", "-q", "origin")
