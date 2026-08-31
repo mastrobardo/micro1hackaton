@@ -137,6 +137,21 @@ def _translate(text: str, rents: list[ReverseEntity]) -> tuple[str, set[str]]:
             text = rx.sub(lambda _m, _r=r.real: _r, text)
             used.add(r.entity_id)
 
+    # 1b. the space-separated display renderings of a multi-segment alias
+    #     (`Vendor A`, `VENDOR A` — how `compile` writes a display literal like
+    #     "SkyRoute Data Ltd"). Segment splice below can't see across a space, so a
+    #     comment or prose line the consultancy wrote using the ghost display name
+    #     would otherwise carry a ghost alias into the real PR.
+    for r in sorted(rents, key=lambda r: -len(r.ghost_segments)):
+        if len(r.ghost_segments) < 2:
+            continue
+        for variant in (" ".join(s.capitalize() for s in r.ghost_segments),
+                        " ".join(s.upper() for s in r.ghost_segments)):
+            rx = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(variant) + r"(?![A-Za-z0-9_])")
+            if rx.search(text):
+                text = rx.sub(lambda _m, _r=r.real: _r, text)
+                used.add(r.entity_id)
+
     # 2. segment splice for the remaining alias casings (vendorA, VENDOR_A_URL, ...)
     hits: list[tuple[int, int, str, str]] = []
     for r in rents:
@@ -236,6 +251,201 @@ def _check_ghost_diff(diff_text: str, rents: list[ReverseEntity], mapping: dict,
         if unmapped:
             raise Rejection("unmapped ghost-alias-shaped token",
                             ", ".join(sorted(unmapped)) + " — not in the mapping store")
+
+
+# --------------------------------------------------------------------------- #
+#  reverse_apply — handoff/base-anchored reverse compile (used by open-real-pr) #
+# --------------------------------------------------------------------------- #
+#
+# `reverse_patch` above rebuilds the real diff by token-translating *every* line
+# of the ghost diff, context lines included. Forward `compile` is not a perfect
+# token-level involution (`SKYROUTE_API_KEY` -> `VENDOR_A_API_KEY` -> reverse
+# `SKY_ROUTE_API_KEY`), so translated context can drift from the real file and
+# `git apply` then rejects the hunk.
+#
+# `reverse_apply` sidesteps that: forward `compile` is *line-preserving* (it only
+# rewrites tokens inside a line, never adds/removes lines), so ghost-repo line N
+# at the handoff commit corresponds 1:1 to real-repo line N at the PR base. It
+# replays the consultancy's hunks onto the *real base file* — context and removed
+# lines are taken verbatim from the real pre-image by position, only added lines
+# are token-translated — and returns concrete file contents that always apply.
+
+
+@dataclass
+class _Hunk:
+    old_start: int
+    old_count: int
+    lines: list[tuple[str, str]] = field(default_factory=list)   # (tag, content), tag in " -+"
+
+
+@dataclass
+class _FileDiff:
+    old_path: str
+    new_path: str
+    is_new: bool = False
+    is_delete: bool = False
+    hunks: list[_Hunk] = field(default_factory=list)
+
+
+@dataclass
+class ReverseApplyResult:
+    files: dict[str, str | None]          # real rel path -> new content, or None = delete
+    entities_resolved: list[str] = field(default_factory=list)
+    lossy_entities: list[str] = field(default_factory=list)
+    n_files: int = 0
+    n_hunks: int = 0
+    fallbacks: list[str] = field(default_factory=list)   # files that missed the line-map anchor
+
+
+_DIFF_HDR = re.compile(r"^diff --git a/(.+?) b/(.+)$")
+_HUNK_HDR = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _parse_unified(diff_text: str) -> list[_FileDiff]:
+    files: list[_FileDiff] = []
+    cur: _FileDiff | None = None
+    hunk: _Hunk | None = None
+    for raw in diff_text.splitlines():
+        m = _DIFF_HDR.match(raw)
+        if m:
+            cur = _FileDiff(m.group(1), m.group(2))
+            files.append(cur)
+            hunk = None
+            continue
+        if cur is None:
+            continue
+        if raw.startswith("new file mode"):
+            cur.is_new = True
+        elif raw.startswith("deleted file mode"):
+            cur.is_delete = True
+        elif (hm := _HUNK_HDR.match(raw)):
+            hunk = _Hunk(int(hm.group(1)), int(hm.group(2) or 1))
+            cur.hunks.append(hunk)
+        elif raw.startswith("\\"):                       # "\ No newline at end of file"
+            continue
+        elif hunk is not None and raw[:1] in (" ", "+", "-"):
+            hunk.lines.append((raw[0], raw[1:]))
+        elif hunk is not None and raw == "":             # a bare blank = context blank line
+            hunk.lines.append((" ", ""))
+    return files
+
+
+def _splice_index(h: _Hunk) -> int:
+    # `@@ -3,2 ...` replaces lines 3-4  -> index 2 ; `@@ -5,0 ...` inserts after line 5 -> index 5
+    return h.old_start - 1 if h.old_count > 0 else h.old_start
+
+
+def _apply_hunks(base_lines: list[str], hunks: list[_Hunk], *,
+                 render_add) -> list[str]:
+    """Replay *hunks* onto *base_lines*. Context / removed lines are consumed from
+    the base by position; added lines come from ``render_add(content)``."""
+    lines = list(base_lines)
+    for h in sorted(hunks, key=lambda h: h.old_start, reverse=True):
+        i = _splice_index(h)
+        seg: list[str] = []
+        k = 0
+        for tag, content in h.lines:
+            if tag == " ":
+                seg.append(lines[i + k] if i + k < len(lines) else content)
+                k += 1
+            elif tag == "-":
+                k += 1
+            else:                                        # "+"
+                seg.append(render_add(content))
+        lines[i:i + h.old_count] = seg
+    return lines
+
+
+def _body_lines(text: str) -> tuple[list[str], str]:
+    """Split keeping the trailing-newline flag; the final "" from a trailing \\n is dropped."""
+    trailing = "\n" if text.endswith("\n") else ""
+    parts = text.split("\n")
+    if trailing:
+        parts = parts[:-1]
+    return parts, trailing
+
+
+def reverse_apply(ghost_diff: str, mapping_path: str, *, config_path: str = "privacy.yaml",
+                  ghost_at=None, real_at=None, mapping_version: int | None = None,
+                  audit_path: str = "workspace/private/audit.jsonl") -> ReverseApplyResult:
+    """Reverse-compile a ghost *impl* diff into concrete real-repo file contents.
+
+    ``ghost_at(rel) -> str | None``  ghost file content at the handoff commit.
+    ``real_at(rel)  -> str | None``  real file content at the PR base.
+
+    Fail-closed (:class:`Rejection`, ``patch.rejected`` audit) on the same
+    conditions as :func:`reverse_patch` — unmapped alias-shaped token, a real
+    value already in the ghost diff, mapping-version mismatch, duplicate ghost
+    alias.
+    """
+    mapping = json.loads(Path(mapping_path).read_text(encoding="utf-8"))
+    cfg = load_config(config_path)
+    audit = AuditLog(audit_path, new_operation_id())
+    try:
+        rents = _reverse_entities(mapping, cfg)
+        _check_ghost_diff(ghost_diff, rents, mapping, cfg, mapping_version)
+    except Rejection as rej:
+        audit.emit("patch.rejected", "reverse-compiler", decision="block",
+                   details={"reason": rej.reason, "detail": rej.detail})
+        raise
+
+    used: set[str] = set()
+
+    def tr(s: str) -> str:
+        t, u = _translate(s, rents)
+        used.update(u)
+        return t
+
+    out: dict[str, str | None] = {}
+    fallbacks: list[str] = []
+    fds = _parse_unified(ghost_diff)
+    n_hunks = sum(len(fd.hunks) for fd in fds)
+
+    for fd in fds:
+        real_old, real_new = tr(fd.old_path), tr(fd.new_path)
+
+        if fd.is_delete:
+            out[real_old] = None
+            continue
+
+        if fd.is_new or (ghost_at and ghost_at(fd.old_path) is None):
+            added = [c for h in fd.hunks for (tag, c) in h.lines if tag == "+"]
+            out[real_new] = "\n".join(tr(l) for l in added) + "\n"
+            continue
+
+        gb = ghost_at(fd.old_path) if ghost_at else None
+        rb = real_at(real_old) if real_at else None
+        if gb is None or rb is None:
+            # no anchor available — translate the reconstructed ghost-impl wholesale
+            gi = _apply_hunks((gb or "").split("\n"), fd.hunks, render_add=lambda c: c)
+            out[real_new] = "\n".join(tr(l) for l in gi)
+            fallbacks.append(real_new)
+            continue
+
+        gbl, _ = _body_lines(gb)
+        rbl, trailing = _body_lines(rb)
+        if len(gbl) != len(rbl):
+            gi = _apply_hunks(gbl, fd.hunks, render_add=lambda c: c)
+            out[real_new] = "\n".join(tr(l) for l in gi) + trailing
+            fallbacks.append(real_new)
+            continue
+
+        merged = _apply_hunks(rbl, fd.hunks, render_add=tr)
+        out[real_new] = "\n".join(merged) + trailing
+        if real_old != real_new:
+            out.setdefault(real_old, None)               # sensitive path component renamed
+
+    by_id = {r.entity_id: r for r in rents}
+    lossy = sorted(eid for eid in used if by_id[eid].lossy)
+    audit.emit("patch.parsed", "reverse-compiler",
+               details={"files": len(fds), "hunks": n_hunks,
+                        "entities_resolved": sorted(used), "fallbacks": fallbacks})
+    for eid in sorted(used):
+        r = by_id[eid]
+        audit.emit("patch.entity_resolved", "reverse-compiler", level=r.level,
+                   subject={"entity_id": eid, "real_sha256": hash_real(r.real)},
+                   details={"lossy": r.lossy})
+    return ReverseApplyResult(out, sorted(used), lossy, len(fds), n_hunks, fallbacks)
 
 
 def _git_apply(real: Path, branch: str, diff: str) -> None:

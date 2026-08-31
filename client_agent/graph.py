@@ -29,6 +29,7 @@ into a real ``interrupt()`` resumed by a git hook.
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import time
@@ -64,6 +65,27 @@ _CONSISTENCY_SYS = (
 
 def _merge_metrics(state: TaskState, **kw) -> dict:
     return {**state.get("metrics", {}), **kw}
+
+
+def _consultancy_checks(task_branch: str) -> dict:
+    """Pull ``ghost_tests`` / ``ghost_build`` off the newest ``role=consultancy`` row
+    for this branch in the shared metrics sink (the consultancy runs under the
+    post-receive hook, which writes into ``$GHOSTC_METRICS_FILE``). Empty on the
+    stub path (those fields are ``None``) or if the file is not there yet."""
+    p = metrics_path()
+    if not p.exists():
+        return {}
+    for line in reversed(p.read_text(encoding="utf-8").splitlines()):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("role") == "consultancy" and row.get("task_branch") == task_branch:
+            return {k: row[k] for k in ("ghost_tests", "ghost_build")
+                    if row.get(k) is not None}
+    return {}
 
 
 def _git(cwd: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -199,7 +221,8 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
         return {"consultancy_pushed": True, "consultancy_commit": added[0],
                 "ghost_branch_in": str(g),
                 "metrics": _merge_metrics(state, consultancy_commits=len(added),
-                                          consultancy_authors=author_list)}
+                                          consultancy_authors=author_list,
+                                          **_consultancy_checks(branch))}
 
     def await_ghost_pr(state: TaskState) -> dict:
         pr_id = consultancy_fn(forge, "ghost", task_branch=state["ghost_branch"],

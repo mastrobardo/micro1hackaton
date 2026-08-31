@@ -39,7 +39,7 @@ from client_agent import localgit
 from ghostc.audit import AuditLog, new_operation_id
 from ghostc.mapping import MappingStore
 from ghostc.patch import Rejection as PatchRejection
-from ghostc.patch import reverse_patch
+from ghostc.patch import reverse_apply
 
 _WORKFLOW_ARTIFACTS = ("TASK.md", "IMPL_NOTES.md")
 
@@ -76,11 +76,12 @@ def _handoff_commit(ghost: Path, ref: str) -> str:
     return shas[-1] if shas else ""
 
 
-def _git_apply(real: Path, diff: str, *flags: str) -> subprocess.CompletedProcess:
+def _show(repo: Path, rev: str, path: str) -> str | None:
+    """``git -C <repo> show <rev>:<path>`` — file content at a revision, or None if absent."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    return subprocess.run(
-        ["git", "-C", str(real), "apply", "--whitespace=nowarn", *flags],
-        input=diff, capture_output=True, text=True, env=env)
+    r = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{path}"],
+                       capture_output=True, text=True, env=env)
+    return r.stdout if r.returncode == 0 else None
 
 
 @traceable(run_type="chain", name="client.open_real_pr")
@@ -141,37 +142,36 @@ def open_real_pr(*, task_id: str, spec_slug: str, config_path: str, ghost_tree: 
 
     scratch = Path(scratch_dir)
     scratch.mkdir(parents=True, exist_ok=True)
-    diff_path = scratch / f"{task_id}.ghost-impl.diff"
-    diff_path.write_text(ghost_diff + "\n", encoding="utf-8")
+    (scratch / f"{task_id}.ghost-impl.diff").write_text(ghost_diff + "\n", encoding="utf-8")
 
+    # handoff/base-anchored reverse: replay the consultancy's hunks onto the real
+    # pre-image (context from real, only added lines translated) so the result
+    # always applies — see ghostc.patch.reverse_apply.
     try:
-        res = reverse_patch(str(diff_path), mapping_path, config_path=config_path,
-                            mapping_version=mapping_version, do_apply=False,
-                            audit_path=audit_path)
+        res = reverse_apply(
+            ghost_diff, mapping_path, config_path=config_path,
+            ghost_at=lambda p: _show(ghost, handoff, p),
+            real_at=lambda p: _show(real, base, p),
+            mapping_version=mapping_version, audit_path=audit_path)
     except PatchRejection as rej:
         audit.emit("agent.real_pr_blocked", "client_agent", decision="block",
                    details={"task_id": task_id, "reason": rej.reason, "detail": rej.detail})
         _reject_row("rejected", f"reverse-patch: {rej}")
         raise
 
-    # --- open the decoded branch on the real repo ---------------------------
-    localgit.git(real, "checkout", "-q", "-B", real_branch, base)
-    chk = _git_apply(real, res.real_diff, "--check", "--3way")
-    if chk.returncode != 0:
-        chk = _git_apply(real, res.real_diff, "--check")
-    if chk.returncode != 0:
-        localgit.git(real, "checkout", "-q", base, check=False)
-        localgit.git(real, "branch", "-D", real_branch, check=False)
-        detail = (chk.stderr or chk.stdout).strip()[:400]
-        audit.emit("agent.real_pr_blocked", "client_agent", decision="block",
-                   details={"task_id": task_id, "reason": "real diff does not apply",
-                            "detail": detail})
-        _reject_row("rejected", "real diff does not apply cleanly to the real repo")
-        raise PatchRejection("real diff does not apply", detail)
+    if not res.files:
+        _reject_row("rejected", "reverse-patch: nothing to reverse")
+        raise NotReady(f"{ghost_branch}: reverse compile produced no file changes")
 
-    app = _git_apply(real, res.real_diff, "--3way")
-    if app.returncode != 0:
-        app = _git_apply(real, res.real_diff)
+    # --- open the decoded branch on the real repo -------------------------
+    localgit.git(real, "checkout", "-q", "-B", real_branch, base)
+    for rel, content in res.files.items():
+        fp = real / rel
+        if content is None:
+            fp.unlink(missing_ok=True)
+        else:
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content, encoding="utf-8")
     localgit.git(real, "add", "-A")
     body = _pr_body(task_id, ghost_branch, real_branch, res)
     (real / "PR_BODY.md").write_text(body, encoding="utf-8")
@@ -183,7 +183,8 @@ def open_real_pr(*, task_id: str, spec_slug: str, config_path: str, ghost_tree: 
 
     audit.emit("agent.real_pr_opened", "client_agent",
                details={"task_id": task_id, "branch": real_branch, "commit": sha,
-                        "base": base, "files": res.files, "hunks": res.hunks,
+                        "base": base, "files": res.n_files, "hunks": res.n_hunks,
+                        "fallbacks": res.fallbacks,
                         "entities_resolved": res.entities_resolved})
     audit.emit("approval.requested", "orchestrator", actor="system", decision="pending",
                details={"gate": "real_pr_review", "branch": real_branch})
@@ -193,7 +194,8 @@ def open_real_pr(*, task_id: str, spec_slug: str, config_path: str, ghost_tree: 
            "ghost_handoff": handoff, "real_repo": str(real), "real_branch": real_branch,
            "real_commit": sha, "base": base,
            "entities_resolved": res.entities_resolved,
-           "lossy_entities": res.lossy_entities, "files": res.files, "hunks": res.hunks,
+           "lossy_entities": res.lossy_entities, "files": res.n_files, "hunks": res.n_hunks,
+           "fallbacks": res.fallbacks,
            "wall_clock_s": round(time.time() - started, 3)}
     record_run(row, path=metrics_file)
     audit.emit("agent.metrics", "client_agent", details=row)
@@ -203,13 +205,15 @@ def open_real_pr(*, task_id: str, spec_slug: str, config_path: str, ghost_tree: 
 def _pr_body(task_id: str, ghost_branch: str, real_branch: str, res) -> str:
     lossy = (f"- **Lossy (verify prose casing):** {', '.join(res.lossy_entities)}\n"
              if res.lossy_entities else "")
+    fb = (f"- **Line-map fallback (review closely):** {', '.join(res.fallbacks)}\n"
+          if res.fallbacks else "")
     return (
         f"# [real] {task_id}\n\n"
         f"Reverse-compiled from the ghost task branch `{ghost_branch}` "
         f"(consultancy implementation) → `{real_branch}`.\n\n"
         f"- **Entities resolved:** {', '.join(res.entities_resolved) or '(none)'}\n"
-        f"{lossy}"
-        f"- **Translated:** {res.files} file(s), {res.hunks} hunk(s)\n\n"
+        f"{lossy}{fb}"
+        f"- **Translated:** {res.n_files} file(s), {res.n_hunks} hunk(s)\n\n"
         "**HUMAN REVIEW REQUIRED** before merge — check the diff matches the "
         "original ticket and introduces no new real-world entity.\n"
     )

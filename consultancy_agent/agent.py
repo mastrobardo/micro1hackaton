@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -45,8 +46,14 @@ from bridge.llm import StubLLM, configure_langsmith, get_llm
 from bridge.metrics import record_run
 from bridge.trace import traceable
 
-_MAX_STEPS = 24
+_MAX_STEPS = 40
 _MAX_OBS_CHARS = 4000
+# `done:true` is refused while tests/build are not both green; after this many
+# refusals we accept the partial result rather than burn the whole step budget.
+_MAX_DONE_NUDGES = 3
+# only the TASK/AC header + this many trailing exchanges are sent each turn, so a
+# long run does not grow the prompt without bound.
+_TRANSCRIPT_TAIL = 30
 
 # The consultancy commits as its own actor — a different person from the client's
 # `ghostc-client` handoff commit, so `git log` on the task branch shows two parties.
@@ -55,9 +62,23 @@ _DEFAULT_GIT_NAME = "Consultancy Dev"
 _DEFAULT_GIT_EMAIL = "dev@consultancy.example"
 
 _SYSTEM = """You are an autonomous coding agent working inside a single git checkout.
-You are implementing the change described in TASK.md. Work only inside the repo.
+Implement the change described in TASK.md **in full**. Work only inside the repo.
 
-Each turn, reply with ONE json object and nothing else:
+Method — follow in order:
+  1. list_files on "." and the directories it names to learn the layout.
+  2. Enumerate the acceptance criteria (AC1, AC2, ...) from TASK.md. You must
+     satisfy EVERY one — a partial implementation is a failure.
+  3. read_file the existing files the task points at (the sibling client / service
+     / config / test it tells you to mirror) BEFORE writing, so new code matches
+     the surrounding style and shape.
+  4. write_file each change. Keep writes minimal and idiomatic.
+  5. run_tests, then run_build. If either fails, read the output, fix the code,
+     and re-run. Repeat until both pass.
+  6. Only when every AC is done AND run_tests AND run_build have both passed on
+     this checkout, reply {"done": true, "summary": "<what you changed, AC by AC>"}.
+
+Each turn, reply with exactly ONE json object and nothing else — no prose, no
+markdown fences:
   {"tool": "list_files", "args": {"dir": "."}}
   {"tool": "read_file", "args": {"path": "src/config.js"}}
   {"tool": "write_file", "args": {"path": "src/x.js", "content": "..."}}
@@ -65,9 +86,8 @@ Each turn, reply with ONE json object and nothing else:
   {"tool": "run_build", "args": {}}
   {"done": true, "summary": "<what you changed>"}
 
-Finish (done:true) once the acceptance criteria are met and tests + build pass, or
-if you cannot make further progress. Keep writes minimal and idiomatic to the
-surrounding code."""
+You have a generous step budget. Do not stop early, do not leave an AC unfinished,
+and do not claim done before the tests and build have actually passed."""
 
 
 @dataclass
@@ -78,6 +98,53 @@ class RunResult:
     backend: str
     steps: int = 0
     summary: str = ""
+    ghost_tests: dict | None = None   # {ok, pass, fail, tests} from `node --test`
+    ghost_build: dict | None = None   # {ok} from the build script
+
+
+def _acceptance_criteria(task: str) -> str:
+    """The '## Acceptance criteria' block of TASK.md, verbatim (up to the next '## ')."""
+    out: list[str] = []
+    capture = False
+    for ln in task.splitlines():
+        s = ln.strip().lower()
+        if s.startswith("## ") and "acceptance" in s:
+            capture = True
+            continue
+        if capture and ln.strip().startswith("## "):
+            break
+        if capture:
+            out.append(ln)
+    return "\n".join(out).strip()
+
+
+def _parse_action(text: str) -> dict:
+    """Tolerant: strips a ```json fence and any prose around the object."""
+    t = text.strip()
+    if t.startswith("```"):
+        t = t[3:]
+        if t[:4].lower() == "json":
+            t = t[4:]
+        t = t.split("```", 1)[0]
+    t = t.strip()
+    try:
+        return json.loads(t)
+    except (ValueError, json.JSONDecodeError):
+        pass
+    try:
+        return json.loads(t[t.index("{"): t.rindex("}") + 1])
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _test_counts(obs: str) -> dict:
+    """Parse the `node --test` TAP summary tail produced by :func:`_npm`."""
+    def _n(key: str) -> int | None:
+        m = re.search(rf"^# {key} (\d+)$", obs, re.M)
+        return int(m.group(1)) if m else None
+
+    return {"ok": obs.startswith("exit=0"), "pass": _n("pass"),
+            "fail": _n("fail"), "tests": _n("tests")}
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -142,7 +209,7 @@ def _complete(llm, transcript: list[str], *, attempts: int = 4):
     last: Exception | None = None
     for i in range(attempts):
         try:
-            return llm.complete(system=_SYSTEM, user="\n\n".join(transcript), max_tokens=4096)
+            return llm.complete(system=_SYSTEM, user="\n\n".join(transcript), max_tokens=8000)
         except Exception as exc:  # noqa: BLE001 - anthropic errors, not importable here
             last = exc
             if not any(t in str(exc).lower() for t in _TRANSIENT):
@@ -152,28 +219,70 @@ def _complete(llm, transcript: list[str], *, attempts: int = 4):
 
 
 def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
+    """Drive Claude through the checkout until every AC is met and tests + build are
+    green, or the step / nudge budget runs out. Returns (changed, steps, summary).
+
+    ``done:true`` is only honoured once ``run_tests`` and ``run_build`` have each
+    returned ``exit=0`` since the last ``write_file`` — otherwise the model is
+    nudged to keep going. After ``_MAX_DONE_NUDGES`` refusals the partial result
+    is accepted so the run still commits something.
+    """
     changed: set[str] = set()
-    transcript = [f"TASK.md:\n{task}\n"]
+    acs = _acceptance_criteria(task)
+    header = [f"TASK.md:\n{task}\n"]
+    if acs:
+        header.append("[acceptance criteria — you must satisfy EVERY one]\n" + acs)
+    exchanges: list[str] = []
     summary = ""
+    tests_green = build_green = False
+    done_nudges = 0
+
     for step in range(1, _MAX_STEPS + 1):
+        status = (f"[status] step {step}/{_MAX_STEPS} · tests_green={tests_green} · "
+                  f"build_green={build_green} · files_written={sorted(changed) or []}")
+        prompt = header + exchanges[-_TRANSCRIPT_TAIL:] + [status]
         try:
-            reply = _complete(llm, transcript)
+            reply = _complete(llm, prompt)
         except Exception as exc:  # noqa: BLE001 - give up cleanly, keep partial work
             return changed, step, f"stopped after {step - 1} step(s): LLM error: {exc}"
         try:
-            action = json.loads(reply.text[reply.text.index("{"):reply.text.rindex("}") + 1])
-        except (ValueError, json.JSONDecodeError):
-            transcript.append(f"[obs] could not parse your reply as json; retry")
+            action = _parse_action(reply.text)
+        except ValueError:
+            exchanges.append("[obs] could not parse your reply — send exactly ONE json "
+                             "object, no markdown fences, no prose")
             continue
+
         if action.get("done"):
-            summary = str(action.get("summary", ""))
-            return changed, step, summary
+            if tests_green and build_green:
+                return changed, step, str(action.get("summary", ""))
+            done_nudges += 1
+            if done_nudges > _MAX_DONE_NUDGES:
+                return changed, step, (str(action.get("summary", "")).strip()
+                                       + " [accepted with tests/build NOT confirmed green]")
+            missing = []
+            if not tests_green:
+                missing.append("run_tests has not returned exit=0 since your last write_file")
+            if not build_green:
+                missing.append("run_build has not returned exit=0 since your last write_file")
+            exchanges.append("[obs] you are NOT done — " + "; ".join(missing)
+                             + ". Run run_tests and run_build; if either fails, read the "
+                             "output, fix the code, and re-run. Re-check every acceptance "
+                             "criterion before saying done again.")
+            continue
+
         tool, targs = action.get("tool", ""), action.get("args", {}) or {}
         try:
             obs = _run_tool(root, tool, targs, changed)
         except Exception as exc:  # noqa: BLE001 - surface tool errors back to the model
             obs = f"[error] {exc}"
-        transcript.append(f"[action] {json.dumps(action)[:400]}\n[obs]\n{obs[:_MAX_OBS_CHARS]}")
+        if tool == "write_file":
+            tests_green = build_green = False       # code changed — must re-verify
+        elif tool == "run_tests":
+            tests_green = obs.startswith("exit=0")
+        elif tool == "run_build":
+            build_green = obs.startswith("exit=0")
+        exchanges.append(f"[action] {json.dumps(action)[:400]}\n[obs]\n{obs[:_MAX_OBS_CHARS]}")
+
     return changed, _MAX_STEPS, summary or "(step budget exhausted)"
 
 
@@ -214,17 +323,31 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     _git(root, "checkout", "-q", "-B", branch, f"origin/{branch}")
     task = (root / task_file).read_text(encoding="utf-8")
 
-    if isinstance(llm, StubLLM):
+    stub = isinstance(llm, StubLLM)
+    if stub:
         changed, steps, summary = _scripted_impl(root, task), 0, "scripted fallback"
     else:
         changed, steps, summary = _agent_loop(llm, root, task)
 
+    # C3: authoritative test + build status on the developed checkout, recorded
+    # regardless of whether the loop finished clean or ran out of budget. The stub
+    # path makes no real implementation, so there is nothing meaningful to measure.
+    ghost_tests = ghost_build = None
+    if not stub and (root / "package.json").is_file():
+        ghost_tests = _test_counts(_npm(root, "test"))
+        ghost_build = {"ok": _npm(root, "run", "build").startswith("exit=0")}
+
     _git(root, "add", "-A")
     status = _git(root, "status", "--porcelain")
     if not status.strip():                            # nothing to commit — still mark it
+        checks = ""
+        if ghost_tests is not None:
+            checks = (f"\n_tests: {'pass' if ghost_tests['ok'] else 'FAIL'}"
+                      f" ({ghost_tests.get('pass')}/{ghost_tests.get('tests')}), "
+                      f"build: {'pass' if ghost_build['ok'] else 'FAIL'}_\n")
         (root / "IMPL_NOTES.md").write_text(
             f"# Implementation notes\n\n{summary or '(agent made no file changes)'}\n"
-            f"\n_backend: {getattr(llm, 'model', backend)}, steps: {steps}_\n",
+            f"\n_backend: {getattr(llm, 'model', backend)}, steps: {steps}_\n{checks}",
             encoding="utf-8")
         _git(root, "add", "-A")
     msg = f"impl: {branch}" if changed else f"impl (no-op): {branch} — {summary[:60]}"
@@ -233,12 +356,14 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     _git(root, "push", "-q", "origin", branch)        # GHOSTC_NO_HOOK is set by the hook
 
     result = RunResult(branch=branch, commit=sha, files_changed=len(changed),
-                       backend=getattr(llm, "model", backend), steps=steps, summary=summary)
+                       backend=getattr(llm, "model", backend), steps=steps, summary=summary,
+                       ghost_tests=ghost_tests, ghost_build=ghost_build)
     # one metrics row per agent run — GHOSTC_METRICS_FILE is exported by the hook so
     # this lands in the same sink as the client's rows (bridge/metrics.py).
     record_run({"role": "consultancy", "command": "start", "flow": "develop",
                 "task_branch": branch, "backend": result.backend, "steps": steps,
                 "files_changed": len(changed), "outcome": "ok",
                 "summary": summary[:200], "commit": sha,
+                "ghost_tests": ghost_tests, "ghost_build": ghost_build,
                 "wall_clock_s": round(time.time() - started, 3)})
     return result

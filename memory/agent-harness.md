@@ -285,8 +285,45 @@ CI/dashboard artifact "like tests or sonar reports" (dashboard is later, maybe a
 - Threaded `metrics_file` param: `run_task` / `build_client_graph` / `_install_post_receive`
   / `ensure_ghost_origin` (all default `None`/`""` → no behaviour change when unset).
 
+## C2/C3 consultancy-loop hardening — session 6 (2026-08-31)
+
+The Claude path of `consultancy_agent/agent.py` (`--backend stub` untouched, so `pytest` +
+`test_agentic_e2e.py` stay deterministic and offline):
+
+- **`done:true` is now gated on green CI, not the model's word.** `_agent_loop` tracks
+  `tests_green` / `build_green` — reset on every `write_file`, set on an `exit=0` from
+  `run_tests` / `run_build`. A `done` with either flag false is refused with a nudge naming
+  what's missing; after `_MAX_DONE_NUDGES` (3) refusals or the step budget the partial is
+  accepted so the run still commits.
+- `_MAX_STEPS` 24 → **40**; `_complete` `max_tokens` 4096 → 8000.
+- `_SYSTEM` rewritten as an ordered method (list files → enumerate the ACs → read the
+  sibling client/service/config/test the ticket says to mirror → write → run tests+build →
+  fix → only then `done`), "one json object, no markdown fences".
+- `_acceptance_criteria(task)` slices the `## Acceptance criteria` block out of TASK.md and
+  pins it in the prompt header (survives transcript trimming).
+- `_parse_action(text)` strips a ```json fence and tolerates prose around the object.
+- Prompt each turn = header (TASK + ACs) + last `_TRANSCRIPT_TAIL` (30) exchanges + a
+  compact `[status] step n/40 · tests_green=… · build_green=… · files_written=…` line, so a
+  long run doesn't grow the prompt without bound.
+
+**C3 — the "it works" number.** `agent.run()` runs one authoritative `npm test` +
+`npm run build` on the developed checkout (skipped on the stub path) and records
+`ghost_tests` (`{ok, pass, fail, tests}` parsed from the `node --test` TAP tail via
+`_test_counts`) + `ghost_build` (`{ok}`) into **both** the `metrics/agent-runs.jsonl`
+consultancy row and `RunResult`. `client_agent/graph.py::await_consultancy` reads the newest
+`role=consultancy` row for the task branch (via `bridge.metrics.metrics_path()`) and merges
+those two keys into `state["metrics"]` → they flow through `emit_metrics`. No-op on stub
+(fields are `None`, filtered out).
+
+Chose "bigger budget + nudge + green-gate" over adding native Anthropic tool-use to
+`bridge/llm.py` — smaller blast radius before the deadline. Native `messages.create(tools=)`
++ a `tool_use` loop (keeping `StubLLM` scripted) is the noted cleaner follow-up.
+
 ## Known / deferred
 
+- **Native Anthropic tool-use** for the consultancy loop (replace the hand-rolled JSON-text
+  protocol): `complete_with_tools(system, messages, tools)` on `ClaudeLLM`, loop on
+  `tool_use` blocks, `StubLLM` returns the scripted actions. Post-hackathon.
 - `ghostc/patch.py` audit events use `component: "reverse-compiler"` (hyphen) — **not** the
   schema enum's `reverse_compiler`. Pre-existing; fix in Phase F.
 - Phase B `verify` node is a lightweight `git apply --check` of the real diff; the full
