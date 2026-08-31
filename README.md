@@ -125,6 +125,20 @@ its own subset.
 key is in LangSmith's **EU** tenant, also set
 `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` (a US default + an EU key → `403`).
 
+**CI.** `.github/workflows/agent-workflow.yml` — job `checks` runs `compile`/`verify`/`eval`
+/`pytest` and **fails on a leak-count regression** (`scripts/ci/check_leak_gate.py`); job
+`roundtrip` runs the reduced flow with the stub consultancy and opens the **ghost PR** and the
+**reverse-compiled real PR** on two throwaway GitHub repos, so a reviewer inspects normal forge
+objects without running anything. `workflow_dispatch` can pick `consultancy_backend: claude`.
+Setup: `GETTING_STARTED.md` §7.
+
+**Human review board.** `ghostc-review` (Streamlit, `[review]` extra) — a reviewer accepts /
+ignores / escalates `discover` proposals and clears `restricted` entities into an append-only
+`decisions.jsonl`. `ghostc compile --decisions <path>` / `discover --decisions` consume that
+file (restricted clearances + accepted proposals), so the reviewed ghost reproduces without
+the UI; the same log yields a scorer-vs-human agreement stat (Process-data tab). Seeded
+example: `fixtures/decisions.example.jsonl`. Details: `GETTING_STARTED.md` §8.
+
 ### Poking the MCP server
 
 `ghostc-mcp` exposes `compile_spec` / `discover` / `verify` / `apply_patch` as MCP tools.

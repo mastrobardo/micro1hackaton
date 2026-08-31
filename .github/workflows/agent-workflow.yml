@@ -1,0 +1,113 @@
+name: agent-workflow
+
+# Two jobs:
+#   checks     — deterministic, offline, no secrets: compile / verify / eval /
+#                pytest + a leak-count regression gate; publishes the eval report
+#                and the per-run metrics as build artifacts.
+#   roundtrip  — runs the verified reduced flow (sanitized ghost task branch ->
+#                consultancy develops -> reverse-compile onto the real repo) and
+#                opens the two PRs a judge inspects on the throwaway demo repos.
+#                Consultancy backend defaults to the deterministic stub; a manual
+#                run can pick `claude` (needs the ANTHROPIC_API_KEY secret).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  pull_request:
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+    inputs:
+      consultancy_backend:
+        description: "Consultancy coding-agent backend"
+        type: choice
+        options: [stub, claude]
+        default: stub
+      run_roundtrip:
+        description: "Open/update the demo PRs (needs the GH_PAT secret)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-workflow-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: install
+        run: pip install -e ".[dev,agents]"
+      - name: base fixture
+        run: |
+          git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git \
+            ../node-express-boilerplate
+          ./fixtures/apply.sh
+      - name: compile / verify / eval
+        run: |
+          ghostc compile --repo workspace/real --config privacy.yaml
+          ghostc verify --ghost workspace/ghost --mapping workspace/private/mapping.json
+          ghostc eval --real workspace/real --config privacy.yaml
+      - name: leak-count regression gate
+        run: python scripts/ci/check_leak_gate.py workspace/eval-report.csv
+      - name: pytest
+        run: pytest -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: |
+            workspace/eval-report.md
+            workspace/eval-report.csv
+
+  roundtrip:
+    needs: checks
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.event_name != 'workflow_dispatch' || inputs.run_roundtrip)
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+      CONSULTANCY_BACKEND: ${{ inputs.consultancy_backend || 'stub' }}
+      CONSULTANCY_ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GHOSTC_DEMO_ROOT: ${{ runner.temp }}/ghostc-demo
+      GHOSTC_METRICS_FILE: ${{ github.workspace }}/metrics/agent-runs.jsonl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: install
+        run: pip install -e ".[dev,agents]"
+      - name: preflight
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::GH_PAT secret is required to push branches + open the demo PRs"
+            exit 1
+          fi
+          if [ "$CONSULTANCY_BACKEND" = "claude" ] && [ -z "$CONSULTANCY_ANTHROPIC_API_KEY" ]; then
+            echo "::error::consultancy_backend=claude needs the ANTHROPIC_API_KEY secret"
+            exit 1
+          fi
+          git config --global user.email "ci@ghostc.local"
+          git config --global user.name  "ghostc CI"
+      - name: reduced flow + reverse PR + publish
+        run: scripts/ci/run-local.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: roundtrip-metrics
+          path: metrics/agent-runs.jsonl

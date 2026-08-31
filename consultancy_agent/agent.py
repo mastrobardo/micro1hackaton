@@ -287,21 +287,53 @@ def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
 
 
 # ----------------------------------------------------------------- scripted stub
+_SRC_PATH_RE = re.compile(r"`([\w./-]+\.(?:js|ts|mjs|cjs))`")
+_CLASS_RE = re.compile(r"`?([A-Z]\w+)`?\s+class\b|class\s+`?([A-Z]\w+)`?")
+
+
 def _scripted_impl(root: Path, task: str) -> set[str]:
     """Deterministic, offline stand-in for the Claude loop.
 
-    It does not try to satisfy real acceptance criteria — it records the task and
-    leaves one mechanical marker commit so the client graph can observe that the
-    consultancy side ran and pushed on the feature branch.
+    Writes ``IMPL_NOTES.md`` **and** one small implementation file so the ghost
+    task branch carries a real (if minimal) code change — enough for
+    ``client-agent open-real-pr`` to reverse-compile onto the real repo on the
+    fully offline path (`--consultancy-backend stub`). It does not try to satisfy
+    the acceptance criteria; it just leaves a syntactically valid module where the
+    task says one should go. Everything it emits is derived from the
+    already-sanitized ``TASK.md``, so no real entity can enter here.
     """
-    notes = root / "IMPL_NOTES.md"
     head = [ln for ln in task.splitlines() if ln.strip()][:8]
-    notes.write_text(
+    (root / "IMPL_NOTES.md").write_text(
         "# Implementation notes (scripted fallback)\n\n"
         "Deterministic stand-in for the Claude tool-loop "
         "(`--backend stub` / no `CONSULTANCY_ANTHROPIC_API_KEY`).\n\n"
         "## Task digest\n\n" + "\n".join(head) + "\n", encoding="utf-8")
-    return {"IMPL_NOTES.md"}
+    changed = {"IMPL_NOTES.md"}
+
+    # the first *new* source path the task names (AC "New `src/...`"), else a
+    # generic module — never an existing file, so we always add a real change.
+    cand = [m.group(1) for m in _SRC_PATH_RE.finditer(task)
+            if m.group(1).startswith(("src/", "test/", "lib/"))]
+    rel = next((p for p in cand if not (root / p).exists()), "src/ghostc_scripted_stub.js")
+    cm = _CLASS_RE.search(task)
+    name = (cm.group(1) or cm.group(2)) if cm else "GhostcScriptedStub"
+
+    target = root / rel
+    if not target.exists():                       # never clobber an existing file
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "// ghostc scripted stub — deterministic offline stand-in for the\n"
+            "// consultancy agent (`--consultancy-backend stub`). A live run\n"
+            "// replaces this with a real implementation of TASK.md.\n"
+            "'use strict';\n\n"
+            f"class {name} {{\n"
+            "  async fetch() {\n"
+            f"    return {{ provider: {name!r}, fetchedAt: new Date(0).toISOString(), items: [] }};\n"
+            "  }\n"
+            "}\n\n"
+            f"module.exports = {{ {name} }};\n", encoding="utf-8")
+        changed.add(rel)
+    return changed
 
 
 # ------------------------------------------------------------------------- entry

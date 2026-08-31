@@ -113,6 +113,7 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                  audit_path: str = "workspace/private/audit.jsonl",
                  spec_path: str = "workspace/ghost-spec.md",
                  candidates_path: str = "workspace/private/candidates.jsonl",
+                 decisions_path: str | None = None,
                  detect: bool = True,
                  dry_run: bool = False) -> CompileResult:
     repo_p = Path(repo)
@@ -132,11 +133,21 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
         det = detection_settings(cfg)
         scan = scan_repo(str(repo_p), cfg=cfg, settings=det)
         cfg, minted, blocked = _augment_with_auto_candidates(cfg, scan, det)
-        if blocked:
-            raise SystemExit(
-                "BLOCKED: ghostc discover auto-proposed restricted entity(ies) "
-                f"{', '.join(blocked)} (detection.auto_alias). Add them to "
-                "privacy.yaml with `approved_by:` before compiling.")
+    else:
+        blocked = []
+
+    dec_added: list[str] = []
+    dec_cleared: list[str] = []
+    if decisions_path:
+        cfg, dec_added, dec_cleared = _augment_with_decisions(cfg, scan, decisions_path)
+        approved = {e["id"] for e in cfg.get("entities", []) if e.get("approved_by")}
+        blocked = [b for b in blocked if b not in dec_cleared and b not in approved]
+
+    if blocked:
+        raise SystemExit(
+            "BLOCKED: ghostc discover auto-proposed restricted entity(ies) "
+            f"{', '.join(blocked)} (detection.auto_alias). Clear them in the review "
+            "board (ghostc-review) or add `approved_by:` in privacy.yaml before compiling.")
 
     matchers = build_matchers(cfg)
     ent_meta = {e["id"]: e for e in cfg.get("entities", [])}
@@ -152,6 +163,11 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
 
     audit.emit("run.start", "compiler", details={"repo": str(repo_p), "out": str(out_p),
                                                  "config": config_path, "dry_run": dry_run})
+    if dec_added or dec_cleared:
+        audit.emit("run.start", "compiler", decision="review",
+                   details={"decisions": decisions_path,
+                            "human_entities_added": sorted(dec_added),
+                            "restricted_cleared": sorted(dec_cleared)})
 
     if scan is not None:
         if not dry_run:
@@ -351,6 +367,76 @@ def _augment_with_auto_candidates(cfg: dict, scan, settings
         if ent["level"] == "restricted" and not ent.get("approved_by"):
             blocked.append(eid)
     return cfg, minted, blocked
+
+
+def _augment_with_decisions(cfg: dict, scan, decisions_path: str
+                            ) -> tuple[dict, list[str], list[str]]:
+    """Apply the human review log (`ghostc-review` → `decisions.jsonl`):
+
+    * an **accepted** decision for an unconfigured surface becomes a
+      ``source: human`` entity so the matcher pipeline neutralises it;
+    * an **accepted** decision carrying ``approved_by`` for an existing
+      ``restricted`` entity sets ``approved_by`` on it (the human clearance).
+
+    No file / no accepted decisions → ``cfg`` unchanged. Returns
+    ``(cfg, added_ids, cleared_ids)``.
+    """
+    from ghostc.review.store import DecisionStore, surface_key
+
+    p = Path(decisions_path)
+    if not p.exists():
+        return cfg, [], []
+    accepted = DecisionStore(p).accepted()
+    if not accepted:
+        return cfg, [], []
+
+    cfg = copy.deepcopy(cfg)
+    by_id = {e["id"]: e for e in cfg.get("entities", [])}
+    taken = {e.get("ghost", "") for e in cfg.get("entities", [])}
+    ids = set(by_id)
+    cand_by_key = {}
+    for c in (scan.candidates if scan is not None else []):
+        cand_by_key[c.entity_id or surface_key(c.surface)] = c
+
+    added: list[str] = []
+    cleared: list[str] = []
+    for rec in accepted:
+        eid = rec.get("entity_id")
+        if eid and eid in by_id:
+            e = by_id[eid]
+            if (e.get("level") == "restricted" and rec.get("approved_by")
+                    and not e.get("approved_by")):
+                e["approved_by"] = rec["approved_by"]
+                cleared.append(eid)
+            continue
+        if not eid or eid in ids:
+            continue
+        c = cand_by_key.get(rec["key"])
+        kind = getattr(c, "kind", None) or "vendor"
+        strategy = _KIND_STRATEGY.get(kind, "semantic_alias")
+        ghost = rec.get("ghost") or ("" if strategy == "remove"
+                                     else _next_alias(taken, _KIND_PREFIX.get(kind, "vendor")))
+        taken.add(ghost)
+        ids.add(eid)
+        ent = {
+            "id": eid, "real": rec["surface"], "kind": kind,
+            "level": rec.get("level") or getattr(c, "level", None) or "confidential",
+            "strategy": strategy, "ghost": ghost, "source": "human",
+            "note": f"accepted in review by {rec.get('approved_by') or 'reviewer'}",
+        }
+        if rec.get("approved_by"):
+            ent["approved_by"] = rec["approved_by"]
+        match = []
+        if c is not None:
+            for a in dict.fromkeys([*c.aliases, *[o.surface for o in c.occurrences]]):
+                if a and a != rec["surface"]:
+                    m_kind = "identifier" if _TOKENISH.match(a) and " " not in a else "literal"
+                    match.append({"kind": m_kind, "value": a})
+        if match:
+            ent["match"] = match[:24]
+        cfg["entities"].append(ent)
+        added.append(eid)
+    return cfg, added, cleared
 
 
 def _dedup_occ(occ: list[dict]) -> list[dict]:

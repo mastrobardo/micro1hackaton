@@ -35,6 +35,7 @@ class DiscoverResult:
     candidates_path: Path
     operation_id: str
     metrics: dict
+    decisions: dict | None = None       # {latest, summary} when --decisions was given
 
     @property
     def proposals(self):
@@ -55,9 +56,23 @@ class DiscoverResult:
             "",
             f"proposed entities (not in privacy.yaml): {len(self.proposals)}",
         ]
+        latest = (self.decisions or {}).get("latest", {})
         for c in self.proposals:
+            from ghostc.review.store import surface_key
+            d = latest.get(c.entity_id or surface_key(c.surface))
+            tag = f"  -> reviewer: {d['reviewer_action']}" + (
+                f" ({d['approved_by']})" if d and d.get("approved_by") else "") if d else ""
             lines.append(f"  {c.surface[:40]:40}  {c.score:4.2f}  {c.kind}/{c.level}  "
-                         f"x{len(c.occurrences)}  [{c.action}]")
+                         f"x{len(c.occurrences)}  [{c.action}]{tag}")
+        if self.decisions:
+            sm = self.decisions["summary"]
+            lines.append("")
+            if sm["n_decisions"]:
+                lines.append(f"review decisions: {sm['n_decisions']}  "
+                             f"scorer-vs-human agreement: {sm['agreement_rate']:.0%}  "
+                             f"escalations: {sm['escalations']}  overrides: {sm['overrides']}")
+            else:
+                lines.append("review decisions: 0")
         rc = self.metrics.get("recall_configured")
         if rc is not None:
             lines += ["", f"recall (configured entities re-found from code): {rc:.0%}"]
@@ -73,7 +88,8 @@ class DiscoverResult:
 def discover_repo(repo: str, config_path: str = "privacy.yaml",
                   out: str = "workspace/private/candidates.jsonl",
                   audit_path: str = "workspace/private/audit.jsonl",
-                  threshold: float | None = None) -> DiscoverResult:
+                  threshold: float | None = None,
+                  decisions_path: str | None = None) -> DiscoverResult:
     repo_p = Path(repo)
     if not repo_p.is_dir():
         raise SystemExit(f"repo not found: {repo}")
@@ -118,7 +134,14 @@ def discover_repo(repo: str, config_path: str = "privacy.yaml",
     audit.emit("run.end", "discovery",
                details={k: v for k, v in metrics.items()
                         if k not in ("proposed", "configured_found")})
-    return DiscoverResult(res, out_p, op, metrics)
+
+    decisions = None
+    if decisions_path and Path(decisions_path).exists():
+        from ghostc.review.store import DecisionStore
+        store = DecisionStore(decisions_path)
+        decisions = {"latest": store.latest(), "summary": store.summarize()}
+
+    return DiscoverResult(res, out_p, op, metrics, decisions)
 
 
 def _metrics(res: ScanResult) -> dict:

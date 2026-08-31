@@ -5,6 +5,8 @@ Implemented:  validate-config, discover, compile, compile-spec, verify, baseline
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from ghostc import __version__
@@ -55,9 +57,12 @@ def validate_config(config_path: str) -> None:
               show_default=True, type=click.Path())
 @click.option("--threshold", type=float, default=None,
               help="Override detection.review_threshold for this run.")
+@click.option("--decisions", "decisions_path", default=None, type=click.Path(),
+              help="Human review log (decisions.jsonl): annotate each proposal with "
+                   "the reviewer's call + show scorer-vs-human agreement.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the candidate list as JSON.")
 def discover(repo: str, config_path: str, out_path: str, audit_path: str,
-             threshold: float | None, as_json: bool) -> None:
+             threshold: float | None, decisions_path: str | None, as_json: bool) -> None:
     """Scan REPO, score sensitive-entity candidates, propose the unconfigured ones."""
     from ghostc.discover import discover_repo
 
@@ -67,7 +72,8 @@ def discover(repo: str, config_path: str, out_path: str, audit_path: str,
         raise SystemExit(f"INVALID CONFIG\n{exc}")
 
     result = discover_repo(repo, config_path=config_path, out=out_path,
-                           audit_path=audit_path, threshold=threshold)
+                           audit_path=audit_path, threshold=threshold,
+                           decisions_path=decisions_path)
     if as_json:
         import json
 
@@ -94,11 +100,16 @@ def discover(repo: str, config_path: str, out_path: str, audit_path: str,
               default="workspace/private/candidates.jsonl", show_default=True,
               type=click.Path(),
               help="Detection candidates + review queue — boundary-internal.")
+@click.option("--decisions", "decisions_path", default=None, type=click.Path(),
+              help="Human review log (ghostc-review -> decisions.jsonl): clears "
+                   "approved `restricted` entities + compiles accepted proposals. "
+                   "Omit for today's behaviour.")
 @click.option("--no-detect", is_flag=True,
               help="Skip the candidate-scoring pass (matchers only, no review queue).")
 @click.option("--dry-run", is_flag=True, help="Compute and report; write nothing.")
 def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path: str,
-            audit_path: str, candidates_path: str, no_detect: bool, dry_run: bool) -> None:
+            audit_path: str, candidates_path: str, decisions_path: str | None,
+            no_detect: bool, dry_run: bool) -> None:
     """Compile REPO into a privacy-safe ghost repo + ghost spec."""
     from ghostc.compile import compile_repo
 
@@ -107,18 +118,23 @@ def compile(repo: str, config_path: str, out: str, spec_path: str, mapping_path:
     except ConfigError as exc:
         raise SystemExit(f"INVALID CONFIG\n{exc}")
 
-    pending = entities_needing_approval(cfg)
+    cleared: set[str] = set()
+    if decisions_path and Path(decisions_path).exists():
+        from ghostc.review.store import DecisionStore
+        cleared = DecisionStore(decisions_path).cleared_restricted()
+
+    pending = [e for e in entities_needing_approval(cfg) if e["id"] not in cleared]
     if pending:
         names = ", ".join(e["id"] for e in pending)
         raise SystemExit(
             f"BLOCKED: {len(pending)} restricted entity(ies) awaiting human approval: {names}\n"
-            "Add `approved_by:` in the config before compiling."
+            "Clear them in `ghostc-review` (--decisions) or add `approved_by:` in the config."
         )
 
     result = compile_repo(repo, config_path=config_path, out=out, spec_path=spec_path,
                           mapping_path=mapping_path, audit_path=audit_path,
-                          candidates_path=candidates_path, detect=not no_detect,
-                          dry_run=dry_run)
+                          candidates_path=candidates_path, decisions_path=decisions_path,
+                          detect=not no_detect, dry_run=dry_run)
     click.echo(result.summary())
 
 

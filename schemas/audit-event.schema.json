@@ -18,13 +18,14 @@
         "patch.parsed", "patch.entity_resolved", "patch.applied", "patch.rejected",
         "consistency.verdict",
         "spec.compiled", "spec.rejected",
+        "review.decision_recorded",
         "agent.task_started", "agent.spec_handoff", "agent.ghost_pr_opened",
         "agent.real_pr_opened", "agent.task_completed", "agent.metrics",
         "approval.requested", "approval.granted", "approval.denied",
         "policy.violation"
       ]
     },
-    "component": { "enum": ["orchestrator", "discovery", "compiler", "verifier", "reverse_compiler", "consistency", "eval", "spec_compiler", "client_agent", "consultancy_agent"] },
+    "component": { "enum": ["orchestrator", "discovery", "compiler", "verifier", "reverse_compiler", "consistency", "eval", "spec_compiler", "client_agent", "consultancy_agent", "review"] },
     "actor": { "type": "string", "description": "system | human:<id>" },
     "subject": {
       "type": "object",

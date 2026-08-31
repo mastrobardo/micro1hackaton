@@ -207,6 +207,91 @@ git -C ../ghostc-demo/ghost branch -D ghostc/task/001-add-second-provider
 
 ---
 
+## 7. CI — the workflow as opened pull requests
+
+`.github/workflows/agent-workflow.yml` runs the whole thing in GitHub Actions so a
+reviewer inspects **normal forge objects**, not a local run. Two jobs:
+
+- **`checks`** — deterministic, offline, no secrets: `ghostc compile` / `verify` /
+  `eval` + `pytest`, then `scripts/ci/check_leak_gate.py` **fails the job on a
+  leak-count regression** (compile residual must stay `0` and beat the baseline).
+  The eval report + `metrics/agent-runs.jsonl` are uploaded as build artifacts.
+- **`roundtrip`** — runs the verified reduced flow (`client-agent start` →
+  `open-real-pr`) with the deterministic **stub** consultancy by default, then
+  `scripts/ci/publish-prs.sh` pushes the two branches and opens/updates:
+  - **ghost PR** on `github.com/mastrobardo/ghostc-demo-ghost` — the sanitized
+    `TASK.md` + the consultancy's implementation, **no real names**;
+  - **real PR** on `github.com/mastrobardo/ghostc-demo-real` — the same work
+    reverse-compiled, real names restored, flagged **HUMAN REVIEW REQUIRED**.
+
+  A manual **Run workflow** (`workflow_dispatch`) can set `consultancy_backend:
+  claude` for a live agent run (needs the `ANTHROPIC_API_KEY` secret).
+
+### One-time setup
+
+```bash
+# `gh` must be authed as (or GH_TOKEN set for) the repo owner
+GH_OWNER=mastrobardo scripts/ci/init-demo-repos.sh   # create + seed the two public demo repos
+```
+
+Then add repo secrets (**Settings → Secrets and variables → Actions**):
+
+| Secret | Needed for | Notes |
+|---|---|---|
+| `GH_PAT` | `roundtrip` — push branches + open PRs on the demo repos | a `mastrobardo` PAT with `repo` scope |
+| `ANTHROPIC_API_KEY` | only a `consultancy_backend: claude` dispatch | omit for the deterministic path |
+
+### Dry-run it locally
+
+```bash
+scripts/ci/run-local.sh                         # stub consultancy, opens the two PRs
+CONSULTANCY_BACKEND=claude scripts/ci/run-local.sh
+```
+
+---
+
+## 8. Human review board (`ghostc-review`)
+
+The compiler's `restricted`-entity gate and `discover`'s proposals are approved by
+a person. Today the deterministic path reads that decision from a **file** —
+`decisions.jsonl` — so the ghost reproduces without any UI:
+
+```bash
+# reproduce the reviewed ghost — no Streamlit needed
+ghostc compile --repo workspace/real --config privacy.yaml \
+  --decisions fixtures/decisions.example.jsonl
+#  the seeded example accepts the laundered vendor *Meridian* (-> vendor-e) and
+#  ignores the weaker *Contoso* signal; `discover --decisions` shows the same log
+#  as a scorer-vs-human agreement stat.
+
+ghostc discover --repo workspace/real --config privacy.yaml \
+  --decisions fixtures/decisions.example.jsonl
+```
+
+`decisions.jsonl` is **append-only** (latest record per entity wins, history kept)
+and boundary-internal. `ghostc compile --decisions <path>` reads:
+- **restricted clearances** — a `restricted` entity whose latest decision is
+  `accept` + `approved_by` stops blocking the run;
+- **accepted proposals** — an accepted unconfigured surface is compiled as its own
+  alias (`source: human`).
+No `--decisions` → exactly today's behaviour.
+
+The UI that *writes* that file (optional `[review]` extra):
+
+```bash
+pip install -e ".[review]"
+ghostc-review -- --candidates workspace/private/candidates.jsonl \
+                 --decisions review/decisions.jsonl --config privacy.yaml
+```
+
+- **Review** tab — the `candidates.jsonl` queue; per proposal accept / ignore /
+  escalate, with the implied `privacy.yaml` delta shown live.
+- **Process data** tab — read-only dashboard: `metrics/agent-runs.jsonl`,
+  `eval-report.csv`, audit-event counts, and the scorer-vs-human agreement stat.
+  *The process generates the data that improves the process.*
+
+---
+
 ## Runtime & cost
 
 | Step | Runtime | Cost |
@@ -218,6 +303,10 @@ git -C ../ghostc-demo/ghost branch -D ghostc/task/001-add-second-provider
 | `ghostc-agent run-task --backend stub` | ~5 s | free |
 | `client-agent start --consultancy-backend claude` | ~3 min | ≈ **$0.50–2** (Claude Opus, ~1 real agent run; approximate — varies with the model's step count) |
 | `client-agent open-real-pr` | seconds | free (deterministic reverse-compile) |
+| `scripts/ci/run-local.sh` (stub) | ~15 s + push | free |
+| CI `checks` job | ~2 min | free |
+| `ghostc compile --decisions …` | seconds | free |
+| `ghostc-review` (Streamlit) | interactive | free |
 
 ---
 
@@ -228,8 +317,10 @@ git -C ../ghostc-demo/ghost branch -D ghostc/task/001-add-second-provider
 | `base repo not found at ../node-express-boilerplate` | run the `git clone` in step 1 |
 | many `pytest` skips | expected before `./fixtures/apply.sh`; node-gated tests also skip without Node |
 | `the agent workflow needs the [agents] extra` | `pip install -e ".[agents]"` |
+| `the review board needs the [review] extra` | `pip install -e ".[review]"` (only the UI needs it; `--decisions` does not) |
 | LangSmith `403` | your key is EU-tenant — set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` |
-| `open-real-pr` says `NotReady` | the `--backend stub` consultancy writes only `IMPL_NOTES.md`; use `--consultancy-backend claude` for the reverse leg |
+| `open-real-pr` says `NotReady` | the ghost task branch has no impl on top of `TASK.md` — run `client-agent start <spec>` first (the stub backend now writes a small real file, so the offline reverse works) |
+| CI `roundtrip` job: `GH_PAT secret is required` | add the `GH_PAT` repo secret, or run only `checks` (the deterministic job) |
 
 ---
 

@@ -1,70 +1,86 @@
-# Session TODO — handoff (updated 2026-08-31, end of session 7)
+# Session TODO — handoff (updated 2026-08-31, end of session 9)
 
 Start-here checklist for the next session. Running status + decision log: **`PROGRESS.md`
 (read first)**. Durable notes: `memory/` (index `memory/MEMORY.md`). Long-term plan:
 `TODO.md`. Conventions + "memory stays in-repo": `CLAUDE.md`.
 
-`pytest` → **268 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
+`pytest` → **~302 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
 Branch: `feat/006_reverse-pr-and-metrics`.
 
 ---
 
-## NEXT SESSION — wire the workflow into CI
+## DONE session 9 — human review board + process dashboard
 
-**Goal:** a reviewer (judge) sees the workflow's output as **opened pull requests** on a real
-forge — the ghost PR and the reverse-compiled real PR — as normal forge objects. They will
-**not** be expected to run the Actions themselves; the PRs (+ the eval report / metrics as a
-build artifact or status check) are the deliverable they inspect.
+`ghostc/review/{__init__,store,model,app}.py` + `--decisions` on `compile`/`discover` +
+`fixtures/decisions.example.jsonl` + `tests/test_review_{store,model,decisions,app}.py`
+(~22) + `[review]` extra + `ghostc-review` script + schema (`review.decision_recorded`
+event, `review` component) + `.gitignore review/*.jsonl` + `review/.gitkeep`.
 
-Scope for that session (nothing built yet):
-- A GitHub Actions workflow (or equivalent) that runs `ghostc compile` + `client-agent start`
-  + `client-agent open-real-pr` on a push / manual dispatch, using `--consultancy-backend
-  stub` for the deterministic CI path (real Claude behind a secret + `workflow_dispatch` input
-  for a live run).
-- Swap `bridge.forge.LocalBareForge` for a GitHub backend behind the existing `Forge` seam so
-  the ghost/real branches become **actual PRs** (see `ARCHITECTURE.md` →
-  "Where a production integration differs" — that table is the spec for this work).
-- Publish `workspace/eval-report.md` + `metrics/agent-runs.jsonl` as workflow artifacts;
-  fail the job on a leak-count regression.
-- Keep `pytest` + `ghostc eval` green offline — the stub backend stays the default CI backend.
+- **`DecisionStore`** (`store.py`) — append-only `decisions.jsonl`, one record per key
+  (`entity_id` or `sha256:<surface>`), latest-wins + full history. `accepted()` /
+  `ignored_keys()` / `cleared_restricted()` (latest `accept` + `approved_by`) /
+  `summarize()` (scorer-vs-human agreement). `record(..., audit=AuditLog)` emits a
+  hash-only `review.decision_recorded`.
+- **`ghostc compile --decisions <path>`** — `_augment_with_decisions` injects accepted
+  proposals as `source: human` entities and sets `approved_by` on cleared restricted
+  entities; the CLI `pending` gate subtracts `cleared_restricted()`. **No `--decisions`
+  → byte-identical to today.** `discover --decisions` annotates each proposal + prints
+  the agreement stat.
+- **`ghostc-review`** (`app.py`, `[review]` extra) — re-execs `streamlit run`. Review tab
+  (accept / ignore / escalate → `decisions.jsonl`, live `privacy.yaml` delta) +
+  Process-data tab (metrics / eval-report / audit-event counts / agreement — read-only).
+  Decision logic lives in `model.py` (streamlit-free, unit-tested).
+- **Seeded example** — `fixtures/decisions.example.jsonl`: accept *Meridian* → `vendor-e`
+  (0 residue), ignore *Contoso* (0.83, too weak). `ghostc compile --repo workspace/real
+  --config privacy.yaml --decisions fixtures/decisions.example.jsonl` reproduces the
+  reviewed ghost with no Streamlit.
 
-Decision to confirm at the top of that session: which forge (a throwaway GitHub repo under the
-user's account vs. a self-hosted Gitea) and whether the real-Claude run is in-CI or a
-documented local step whose PR is pushed.
+**Watch for:** `cleared_restricted()` returns any `accept`+approver id regardless of the
+entity's level (it's only ever intersected with `entities_needing_approval`, so harmless).
+`model.entity_from_decision` and `compile._augment_with_decisions` duplicate the
+synthetic-entity build — keep them in sync or unify later.
 
-## SESSION AFTER CI — human review board (Streamlit), MVP
-
-Confirmed with the user (session 7): **MVP scope, its own session, after CI.**
-
-The human approval gate today = hand-editing `approved_by:` / entities into `privacy.yaml`
-(`ghostc/config.py::entities_needing_approval`, `compile.py` blocks on unapproved `restricted`
-proposals). Replace that with a real reviewer UI whose decisions also become process-tuning
-data.
-
-MVP:
-- **`ghostc/review/store.py`** — append-only `decisions.jsonl`: one record per surface/entity
-  (proposed action vs reviewer action, level, `approved_by`, note, ts, op-id; latest
-  supersedes, history kept = revision). Plus `summarize()` = scorer-vs-human agreement.
-- **`ghostc-review`** Streamlit app (`[review]` optional extra; core + `pytest` untouched):
-  **Review** tab (`candidates.jsonl` table — score, signal badges, occurrences; per row
-  accept→entity+level+approver / ignore / escalate-to-restricted → writes `decisions.jsonl`,
-  shows the implied `privacy.yaml` delta) + **Process data** tab (render
-  `metrics/agent-runs.jsonl` + `eval-report.csv` + audit-event counts + the agreement stat;
-  read-only).
-- **`ghostc compile` / `discover` gain `--decisions <path>`**; `compile` reads restricted
-  clearances + accepted proposals from it. No file → today's behavior (backward compatible).
-  New `review.decision_recorded` audit event.
-- **`fixtures/decisions.example.jsonl`** seeded — a judge reproduces the ghost WITHOUT running
-  Streamlit; the app is how decisions are *made*, the file is what the pipeline consumes.
-- Tests: store round-trip; `compile` honors decisions (restricted cleared → runs; absent →
-  blocks); `importorskip("streamlit")`, app logic in a testable module.
-- Docs: README + `GETTING_STARTED.md` "Human review board" section; `ARCHITECTURE.md`
-  "Where a production integration differs" row (local Streamlit → forge/tracker review queue);
-  `VIDEO_SCRIPT.md` beat (already foreshadowed in the hot-take).
-
-Stretch / later: a PR-consistency approval tab (real diff + verdict + new-entity flags →
-approve / request-changes, no auto-merge); an explicit "raise `review_threshold` to X"
+**Stretch / later (unchanged):** a PR-consistency approval tab (real diff + verdict +
+new-entity flags → approve / request-changes); an explicit "raise `review_threshold` to X"
 suggestion from the aggregated decisions.
+
+---
+
+## DONE session 8 — workflow wired into CI
+
+`.github/workflows/agent-workflow.yml` + `scripts/ci/*` + `client_agent/publish.py` +
+`tests/test_ci_publish.py`. Decisions (user, session 8): **publish-step on the verified
+reduced flow** (not a `Forge`-seam rebuild); **two public throwaway repos under `mastrobardo`**;
+**stub in CI, real Claude via `workflow_dispatch`**.
+
+- **`checks` job** — offline, no secrets: `compile`/`verify`/`eval`/`pytest`, then
+  `scripts/ci/check_leak_gate.py` fails on a leak-count regression (compile residual > 0 or
+  baseline no longer worse). Eval report + `metrics/agent-runs.jsonl` uploaded as artifacts.
+- **`roundtrip` job** — `client-agent start` + `open-real-pr` (stub consultancy), then
+  `scripts/ci/publish-prs.sh` force-pushes `main` + the two branches to the demo repos and
+  `gh pr create`/`edit`s the **ghost PR** (sanitized `TASK.md` + impl) and the **real PR**
+  (reverse-compiled, real names restored, HUMAN REVIEW flag). Needs `GH_PAT`; skipped on PRs.
+- **`consultancy_agent/agent.py::_scripted_impl`** now writes one small real file (first
+  `src/…` path the sanitized TASK.md names, e.g. `partnerAClient.js` → reverses to
+  `companyXClient.js`) **plus** `IMPL_NOTES.md` — so the fully-offline reverse produces a
+  non-empty real PR. `client_agent/publish.py` is stdlib-only so the shell can call it.
+- **Verified locally** end-to-end against bare-repo stand-ins + a fake `gh`: both PRs get
+  minimal diffs, `entities_resolved=[vendor_companyx]`, real branch leak-scan clean.
+
+**Manual, one-time (user):** `gh auth switch` to `mastrobardo` (or `GH_TOKEN`) →
+`scripts/ci/init-demo-repos.sh` → add repo secrets `GH_PAT` (repo scope) and, for live runs,
+`ANTHROPIC_API_KEY`. Then push the branch so Actions picks up the workflow.
+
+**Watch for:** `publish-prs.sh` force-pushes `main` on the throwaway repos every run (compile
+mints a fresh root commit each time; the repos are disposable). If the base needs to be
+stable, make `ghostc compile`'s baseline commit reproducible (fixed `GIT_*_DATE`).
+
+---
+
+## Human review board — DONE (session 9, spec above)
+
+Implemented per the session-7 spec; details in **DONE session 9** at the top of this
+file and `PROGRESS.md`. `VIDEO_SCRIPT.md` still has the review-board beat to record.
 
 ### DONE session 7 — submission docs
 
