@@ -45,6 +45,7 @@ from bridge.env import load_env
 from bridge.llm import StubLLM, configure_langsmith, get_llm
 from bridge.metrics import record_run
 from bridge.trace import traceable
+from bridge.trajectory import open_trajectory
 
 _MAX_STEPS = 40
 _MAX_OBS_CHARS = 4000
@@ -218,7 +219,7 @@ def _complete(llm, transcript: list[str], *, attempts: int = 4):
     raise last  # type: ignore[misc]
 
 
-def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
+def _agent_loop(llm, root: Path, task: str, trace=None) -> tuple[set[str], int, str]:
     """Drive Claude through the checkout until every AC is met and tests + build are
     green, or the step / nudge budget runs out. Returns (changed, steps, summary).
 
@@ -248,15 +249,26 @@ def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
         try:
             action = _parse_action(reply.text)
         except ValueError:
-            exchanges.append("[obs] could not parse your reply — send exactly ONE json "
-                             "object, no markdown fences, no prose")
+            nudge = ("[obs] could not parse your reply — send exactly ONE json "
+                     "object, no markdown fences, no prose")
+            exchanges.append(nudge)
+            if trace:
+                trace.note(step, nudge, cause="unparseable_reply")
             continue
 
         if action.get("done"):
             if tests_green and build_green:
+                if trace:
+                    trace.step(step, tool="done", args={},
+                               observation="accepted — tests and build both green",
+                               tests_green=True, build_green=True)
                 return changed, step, str(action.get("summary", ""))
             done_nudges += 1
             if done_nudges > _MAX_DONE_NUDGES:
+                if trace:
+                    trace.note(step, "done accepted after "
+                                     f"{done_nudges} refusals — tests/build NOT confirmed",
+                               cause="nudge_budget_exhausted")
                 return changed, step, (str(action.get("summary", "")).strip()
                                        + " [accepted with tests/build NOT confirmed green]")
             missing = []
@@ -264,10 +276,14 @@ def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
                 missing.append("run_tests has not returned exit=0 since your last write_file")
             if not build_green:
                 missing.append("run_build has not returned exit=0 since your last write_file")
-            exchanges.append("[obs] you are NOT done — " + "; ".join(missing)
-                             + ". Run run_tests and run_build; if either fails, read the "
-                             "output, fix the code, and re-run. Re-check every acceptance "
-                             "criterion before saying done again.")
+            nudge = ("[obs] you are NOT done — " + "; ".join(missing)
+                     + ". Run run_tests and run_build; if either fails, read the "
+                     "output, fix the code, and re-run. Re-check every acceptance "
+                     "criterion before saying done again.")
+            exchanges.append(nudge)
+            if trace:
+                trace.note(step, nudge, cause="premature_done", nudge=done_nudges,
+                           tests_green=tests_green, build_green=build_green)
             continue
 
         tool, targs = action.get("tool", ""), action.get("args", {}) or {}
@@ -282,7 +298,13 @@ def _agent_loop(llm, root: Path, task: str) -> tuple[set[str], int, str]:
         elif tool == "run_build":
             build_green = obs.startswith("exit=0")
         exchanges.append(f"[action] {json.dumps(action)[:400]}\n[obs]\n{obs[:_MAX_OBS_CHARS]}")
+        if trace:
+            trace.step(step, tool=tool, args=targs, observation=obs,
+                       tests_green=tests_green, build_green=build_green,
+                       files_written=sorted(changed))
 
+    if trace:
+        trace.note(_MAX_STEPS, "step budget exhausted", cause="step_budget")
     return changed, _MAX_STEPS, summary or "(step budget exhausted)"
 
 
@@ -356,10 +378,26 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     task = (root / task_file).read_text(encoding="utf-8")
 
     stub = isinstance(llm, StubLLM)
+    trace = None
+    if not stub:
+        # Deliverable 04: one line per tool call, so the run can be read back step by
+        # step. Written outside the checkout — `git add -A` below would otherwise
+        # commit it and push it back across the boundary.
+        try:
+            trace = open_trajectory(
+                f"{branch}-consultancy",
+                {"agent": "consultancy", "branch": branch,
+                 "backend": getattr(llm, "model", backend),
+                 "system_prompt": _SYSTEM, "task": task,
+                 "max_steps": _MAX_STEPS, "max_done_nudges": _MAX_DONE_NUDGES},
+                forbid_inside=root)
+        except (OSError, ValueError) as exc:          # tracing must never fail a run
+            print(f"[consultancy] trajectory disabled: {exc}")
+
     if stub:
         changed, steps, summary = _scripted_impl(root, task), 0, "scripted fallback"
     else:
-        changed, steps, summary = _agent_loop(llm, root, task)
+        changed, steps, summary = _agent_loop(llm, root, task, trace=trace)
 
     # C3: authoritative test + build status on the developed checkout, recorded
     # regardless of whether the loop finished clean or ran out of budget. The stub
@@ -390,6 +428,10 @@ def run(repo: str | Path, branch: str, *, backend: str = "auto",
     result = RunResult(branch=branch, commit=sha, files_changed=len(changed),
                        backend=getattr(llm, "model", backend), steps=steps, summary=summary,
                        ghost_tests=ghost_tests, ghost_build=ghost_build)
+    if trace:
+        trace.end(commit=sha, steps=steps, files_changed=len(changed),
+                  files=sorted(changed), summary=summary,
+                  ghost_tests=ghost_tests, ghost_build=ghost_build, outcome="ok")
     # one metrics row per agent run — GHOSTC_METRICS_FILE is exported by the hook so
     # this lands in the same sink as the client's rows (bridge/metrics.py).
     record_run({"role": "consultancy", "command": "start", "flow": "develop",

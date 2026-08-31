@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -95,6 +96,75 @@ def test_ghost_spec_has_no_real_values_and_spans_levels(compiled, seed_entities)
     assert scan_entity_hits(spec, seed_entities) == {}
     for level in ("internal", "confidential", "restricted"):
         assert level in spec
+
+
+# --- the ghost tree explains itself: unconfigured surfaces are declared, not silent ---
+
+def test_ghost_spec_declares_unconfigured_surfaces_left_verbatim(compiled):
+    """`adversary.js` keeps Meridian/Contoso by design (auto_alias off). A reader of
+    the ghost must be told that, or it reads as an unexplained leak."""
+    spec = compiled.spec.read_text()
+    assert "Surfaces present verbatim" in spec
+    assert "Meridian" in spec and "contoso" in spec.lower()
+    assert "not cleared for release" in spec
+    surfaces = {c["surface"] for c in compiled.result.pending_review}
+    assert any("Meridian" in s for s in surfaces)
+
+
+def test_pending_surfaces_are_actually_still_in_the_ghost(compiled):
+    """The spec's claim must match the tree — otherwise it is just prose."""
+    corpus = "\n".join(read_tree(compiled.ghost).values()).casefold()
+    for c in compiled.result.pending_review:
+        assert c["surface"].casefold() in corpus, f"{c['surface']} declared but absent"
+
+
+def test_accepted_proposal_is_aliased_and_drops_off_the_pending_list(
+        tmp_path, real_repo, privacy_yaml):
+    """A reviewer's accept promotes the surface to an entity — it is no longer pending."""
+    from ghostc.compile import compile_repo
+
+    decisions = Path(__file__).resolve().parents[1] / "fixtures" / "decisions.example.jsonl"
+    res = compile_repo(
+        str(real_repo), config_path=str(privacy_yaml),
+        out=str(tmp_path / "ghost"), spec_path=str(tmp_path / "spec.md"),
+        mapping_path=str(tmp_path / "p" / "m.json"),
+        audit_path=str(tmp_path / "p" / "a.jsonl"),
+        candidates_path=str(tmp_path / "p" / "c.jsonl"),
+        decisions_path=str(decisions),
+    )
+    surfaces = {c["surface"].casefold() for c in res.pending_review}
+    assert not any("meridian" in s for s in surfaces), "accepted surface still listed pending"
+    assert "vendor_meridian" in res.entities          # it was compiled as an entity
+
+    # The only surviving spelling is the package import specifier, which `compile`
+    # keeps verbatim on purpose (a renamed dependency would not resolve in the ghost)
+    # and declares in the spec's "Dependency names left un-aliased" table.
+    corpus = "\n".join(read_tree(tmp_path / "ghost").values())
+    survivors = set(re.findall(r"[\w@/.-]*[Mm]eridian[\w@/.-]*", corpus))
+    assert survivors == {"@meridianaero/flight-sdk"}, survivors
+    assert "Meridian Aero Systems" not in corpus
+    kept = {k["specifier"] for k in res.kept_specifiers}
+    assert "@meridianaero/flight-sdk" in kept
+    assert "Dependency names left un-aliased" in (tmp_path / "spec.md").read_text()
+
+
+def test_reviewer_ignored_surface_is_marked_as_decided(tmp_path, real_repo, privacy_yaml):
+    from ghostc.compile import compile_repo
+
+    decisions = Path(__file__).resolve().parents[1] / "fixtures" / "decisions.example.jsonl"
+    res = compile_repo(
+        str(real_repo), config_path=str(privacy_yaml),
+        out=str(tmp_path / "ghost"), spec_path=str(tmp_path / "spec.md"),
+        mapping_path=str(tmp_path / "p" / "m.json"),
+        audit_path=str(tmp_path / "p" / "a.jsonl"),
+        candidates_path=str(tmp_path / "p" / "c.jsonl"),
+        decisions_path=str(decisions),
+    )
+    contoso = [c for c in res.pending_review if "contoso" in c["surface"].casefold()]
+    assert contoso and contoso[0]["reviewed_ignore"] is True
+    spec = (tmp_path / "spec.md").read_text()
+    assert "reviewer chose **ignore**" in spec
+    assert "not cleared for release" not in spec   # nothing undecided remains
 
 
 def test_determinism_across_independent_runs(tmp_path, real_repo, privacy_yaml):

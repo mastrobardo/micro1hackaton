@@ -39,7 +39,7 @@ task text
 ```
 
 See `ARCHITECTURE.md` for component contracts, `THREAT_MODEL.md` for the trust boundary and
-known limitations, `TODO.md` for the full long-term roadmap, and `PROGRESS.md` for current status.
+known limitations, `TODO.md` for the full long-term roadmap, and `docs/PROGRESS.md` for current status.
 
 ## Primary metric
 
@@ -54,7 +54,9 @@ Keyword `sed` redaction to `REDACTED` + the same external agent + the same 10 ta
 "simple script" / "manual process people use today" baseline. `CHANGELOG.md` records each
 iteration from that baseline to the final workflow, with evidence.
 
-## Reproduction (fills in as subcommands land)
+## Reproduction
+
+Full guide, including runtimes and costs: **`GETTING_STARTED.md`**.
 
 ```bash
 # 1. base fixture (MIT, offline — no external accounts)
@@ -64,9 +66,9 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 ./fixtures/apply.sh
 
 # 3. env
-python -m venv .venv && . .venv/bin/activate && pip install -e .
+python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 
-# 4. pipeline  (all 7 subcommands implemented)
+# 4. pipeline
 ghostc discover --repo workspace/real --config privacy.yaml   # score + propose sensitive entities
 ghostc compile  --repo workspace/real --config privacy.yaml --out workspace/ghost
 ghostc verify   --ghost workspace/ghost --mapping workspace/private/mapping.json
@@ -86,12 +88,32 @@ ghostc eval     --real workspace/real --config privacy.yaml   # -> workspace/eva
 A zero-dependency Node app (`fixtures/webapp/`) staged **outside** this repo at
 `../ghostc-demo/{real,ghost}`. Same endpoints, same passing tests, sensitive names aliased.
 
-**Current result** (`ghostc eval` on the fixture): keyword-redaction baseline leaves **28**
-residual real-entity occurrences in what an external agent would see; `ghostc compile` leaves
-**0**, and the ghost PR round-trips back to a real branch through `ghostc apply-patch`.
-`ghostc discover` re-finds all 13 configured entities from code alone and proposes the two
-unconfigured ones seeded in `adversary.js` (Meridian, Contoso) with no OSS-library false
-positives. Full evidence trail: `CHANGELOG.md` + `workspace/eval-report.md`.
+**Current result** (`ghostc eval` on the fixture): scored over **13 cases** — one per
+sensitive entity, same fixture and same scan for both approaches — the keyword-redaction
+baseline is clean on **7/13** and leaves **28** residual real-entity occurrences in what an
+external agent would see; `ghostc compile` is clean on **13/13**, leaving **0**. The hard case
+is `vendor_skyroute` (29 occurrences across code, config, env-var names, hostnames and prose;
+the baseline leaves 11 of them). The ghost PR round-trips back to a real branch through
+`ghostc apply-patch`. `ghostc discover` re-finds all 13 configured entities from code alone and
+proposes the two unconfigured ones seeded in `adversary.js` (Meridian, Contoso) with no
+OSS-library false positives.
+
+Evidence trail: `CHANGELOG.md` (Improvement Changelog) · `workspace/eval-report.md` +
+`workspace/eval-report-cases.csv` (per-case results) · `trajectories/` (one per agent).
+
+## Agent trajectories
+
+`trajectories/` — deliverable 04, one per agent, each readable from the agent's instructions
+through to its final result. **Generated from the run logs**, not written from memory:
+
+```bash
+scripts/make-trajectories.py     # audit.jsonl + metrics/agent-runs.jsonl -> trajectories/*.md
+```
+
+Worth a look: a genuine **fail-closed block and its retry** (the reverse-compiled diff did not
+apply to a real repo that had moved on, so the run stopped and recorded `rejected` rather than
+forcing the patch), and the **verification loop** that refuses the coding agent's `done: true`
+until `run_tests` and `run_build` have both returned `exit=0` since its last write.
 
 ## Agent workflow (`ghostc-agent`, `ghostc-mcp`)
 

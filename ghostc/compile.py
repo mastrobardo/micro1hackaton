@@ -56,6 +56,10 @@ class CompileResult:
     hits: int = 0
     entities: dict[str, EntityRoll] = field(default_factory=dict)
     kept_specifiers: list[dict] = field(default_factory=list)  # {file,line,specifier,entity_id,source}
+    # unconfigured surfaces `discover` flagged for review that are therefore still
+    # present verbatim in the ghost. Listed in the ghost spec so the tree explains
+    # itself: they are pending a human decision, not a leak of a *configured* entity.
+    pending_review: list[dict] = field(default_factory=list)  # {surface,score,level,occurrences}
 
     def summary(self) -> str:
         lines = [
@@ -172,6 +176,7 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
     if scan is not None:
         if not dry_run:
             _write_candidates(Path(candidates_path), scan)
+        ignored_keys, surface_key = _reviewer_ignored(decisions_path)
         for c in scan.candidates:
             if c.action != "review":
                 continue
@@ -183,6 +188,15 @@ def compile_repo(repo: str, config_path: str = "privacy.yaml",
                        details={"score": c.score, "evidence": c.evidence,
                                 "configured": c.entity_id is not None,
                                 "occurrences": len(c.occurrences)})
+            # Unconfigured surfaces are never aliased, so they are still in the ghost
+            # verbatim; the spec must say so rather than leave them unexplained. Check
+            # the *post-decisions* config: a candidate a reviewer accepted has just been
+            # promoted to a real entity here and is no longer pending.
+            if c.entity_id is None and c.surface.casefold() not in _configured_surfaces(cfg):
+                result.pending_review.append(
+                    {"surface": c.surface, "score": c.score, "level": c.level,
+                     "occurrences": len(c.occurrences),
+                     "reviewed_ignore": surface_key(c.surface) in ignored_keys})
 
     if not dry_run:
         if out_p.exists():
@@ -369,6 +383,31 @@ def _augment_with_auto_candidates(cfg: dict, scan, settings
     return cfg, minted, blocked
 
 
+def _configured_surfaces(cfg: dict) -> set[str]:
+    """Every spelling the matchers will neutralise, casefolded.
+
+    Used to tell "still in the ghost verbatim" apart from "handled" — including
+    entities that `--decisions` promoted from a review proposal a moment ago.
+    """
+    out: set[str] = set()
+    for e in cfg.get("entities", []):
+        out.add(str(e.get("real", "")).casefold())
+        for m in e.get("match", []):
+            if m.get("kind") in ("literal", "identifier"):
+                out.add(str(m.get("value", "")).casefold())
+    out.discard("")
+    return out
+
+
+def _reviewer_ignored(decisions_path: str | None):
+    """`(ignored surface keys, surface_key fn)` from the review log — empty without one."""
+    from ghostc.review.store import surface_key
+    if not decisions_path or not Path(decisions_path).exists():
+        return set(), surface_key
+    from ghostc.review.store import DecisionStore
+    return DecisionStore(Path(decisions_path)).ignored_keys(), surface_key
+
+
 def _augment_with_decisions(cfg: dict, scan, decisions_path: str
                             ) -> tuple[dict, list[str], list[str]]:
     """Apply the human review log (`ghostc-review` → `decisions.jsonl`):
@@ -511,6 +550,39 @@ acceptable for this ghost.
 | specifier | occurrences |
 |-----------|-------------|
 {rows2}
+"""
+    if result.pending_review:
+        rows3 = "\n".join(
+            f"| `{c['surface']}` | {c['score']:.2f} | {c['level']} | {c['occurrences']} | "
+            + ("reviewer chose **ignore**" if c.get("reviewed_ignore") else "**undecided**")
+            + " |"
+            for c in sorted(result.pending_review, key=lambda c: -c["score"])
+        )
+        undecided = [c for c in result.pending_review if not c.get("reviewed_ignore")]
+        verdict = (f"**{len(undecided)} of these are still undecided — treat this ghost as "
+                   "not cleared for release.**" if undecided else
+                   "Every surface here was reviewed and deliberately left as-is.")
+        spec += f"""
+## Surfaces present verbatim — not configured entities
+
+`ghostc discover` scored these as probably sensitive, but they are **not configured
+entities**, so nothing was aliased and they appear in this ghost **unchanged**. That is
+deliberate: an unconfigured surface is *proposed*, never silently renamed
+(`detection.auto_alias` is off by default). A surface a reviewer accepted is not listed
+here — it became a real entity and was aliased like any other.
+
+{verdict}
+
+| surface | score | level | occurrences | status |
+|---------|-------|-------|-------------|--------|
+{rows3}
+
+Resolve them, then recompile:
+
+```bash
+ghostc-review -- --candidates <candidates.jsonl> --decisions review/decisions.jsonl
+ghostc compile --repo <real> --config <config> --decisions review/decisions.jsonl
+```
 """
     spec_p.parent.mkdir(parents=True, exist_ok=True)
     spec_p.write_text(spec, encoding="utf-8")

@@ -69,7 +69,7 @@ summary() {
 # ===========================================================================
 step "0. environment"
 run "${GHOSTC[@]}" --version
-run "${GHOSTC[@]}" --help >/dev/null && ok "help lists the 7 commands"
+run "${GHOSTC[@]}" --help >/dev/null && ok "help lists all 8 commands"
 
 step "1. validate the privacy config"
 run "${GHOSTC[@]}" validate-config --config privacy.yaml

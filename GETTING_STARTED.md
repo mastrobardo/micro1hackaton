@@ -60,7 +60,7 @@ pip install -e ".[dev,semantic]"   # real sentence-embeddings for one detection 
 pytest -q
 ```
 
-Expected: **268 passed, 1 skipped** in ~45 s. Fixture-dependent tests skip cleanly if
+Expected: **324 passed, 2 skipped** in ~45 s. Fixture-dependent tests skip cleanly if
 `workspace/real/` is absent, so this is green on a fresh checkout; it goes fully green after
 section 3.
 
@@ -113,9 +113,16 @@ ghostc verify --ghost workspace/ghost --mapping workspace/private/mapping.json
 
 # 5d. eval — count residual real-entity occurrences in baseline vs compile
 ghostc eval --real workspace/real --config privacy.yaml
-#  -> workspace/eval-report.{md,csv}
+#  -> workspace/eval-report.{md,csv} + workspace/eval-report-cases.csv
 #  Expected (casing-aware residual): baseline 28, compile 0.
+#  Expected (per case):  13 scored · clean under compile 13/13 · under baseline 7/13
+#                        hard case: vendor_skyroute
 ```
+
+The per-case table is in `workspace/eval-report.md` and, machine-readable, in
+`workspace/eval-report-cases.csv`. One case = one sensitive entity, scored by the same scan
+on both trees. A configured entity the fixture never uses is listed as `n/a` rather than
+counted as a pass.
 
 **Round-trip a ghost PR back to the real repo** (`ghost diff → real diff`):
 
@@ -324,6 +331,30 @@ ghostc-review -- --candidates workspace/private/candidates.jsonl \
 
 ---
 
+## 9. Agent trajectories (deliverable 04)
+
+One trajectory per agent, rendered from the run logs so they cannot drift from the runs
+they describe:
+
+```bash
+scripts/make-trajectories.py                      # -> trajectories/*.md
+scripts/make-trajectories.py --audit <audit.jsonl> --metrics <runs.jsonl> --out trajectories
+```
+
+- `trajectories/01-client-orchestrator.md` — the LangGraph orchestrator, invocation by
+  invocation, including a real fail-closed **block** and the retry that followed it, and the
+  human approval gate the run ends on.
+- `trajectories/02-consultancy-coding-agent.md` — the external coding agent: its verbatim
+  system prompt, its tool surface, and the verification loop that refuses `done: true` until
+  tests and build are both green.
+
+A `--consultancy-backend claude` run additionally writes a **per-tool-call trace**
+(`bridge/trajectory.py` → `metrics/trajectories/<branch>-consultancy.jsonl`); rerun
+`scripts/make-trajectories.py` afterwards and it is picked up automatically. Override the
+location with `$GHOSTC_TRAJECTORY_DIR`.
+
+---
+
 ## Where to look next
 
 - **`OVERVIEW.md`** — what this is and who it's for, in one page.
@@ -332,3 +363,4 @@ ghostc-review -- --candidates workspace/private/candidates.jsonl \
   CI/CD / issue-tracker integration would differ from this POC.
 - **`cli.md`** — the full command reference with expected output for every subcommand.
 - **`THREAT_MODEL.md`** — the boundary and known limitations.
+- **`trajectories/`** — one agent trajectory per agent, generated from the run logs.

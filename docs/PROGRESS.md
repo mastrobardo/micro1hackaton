@@ -45,7 +45,7 @@ ghostc verify  --ghost workspace/ghost --mapping workspace/private/mapping.json 
 ghostc baseline --repo workspace/real                                            # WORKS: workspace/baseline-ghost/ + baseline-spec.md (keyword redaction, not privacy-safe)
 ghostc eval    --real workspace/real                                            # WORKS: workspace/eval-report.{md,csv}; baseline residual 28 vs compile 0
 ghostc apply-patch --ghost-diff <d> --mapping workspace/private/mapping.json     # WORKS: ghost PR diff -> real PR diff on stdout; --apply lands it on a branch; fail-closed rejects
-pytest -q                                       # WORKS: 205 passed, 1 skipped (fixture built); parity from a clean checkout (more skips, 0 fails)
+pytest -q                                       # WORKS: 324 passed, 2 skipped (fixture built); parity from a clean checkout (more skips, 0 fails)
 ```
 
 Fixture-dependent tests skip cleanly when `workspace/real/` is absent, so `pytest -q` is
@@ -303,7 +303,7 @@ task text
 
 Now measured by `ghostc eval` (`workspace/eval-report.{md,csv}`, derived from the audit log).
 Also enforced by `tests/test_compile.py` + `tests/test_fixture_groundtruth.py` +
-`tests/test_baseline.py` + `tests/test_eval.py` + `tests/test_scoring.py` + `tests/test_discover.py`. `pytest`: 205 passed / 1 skipped.
+`tests/test_baseline.py` + `tests/test_eval.py` + `tests/test_scoring.py` + `tests/test_discover.py`. `pytest`: 324 passed / 2 skipped.
 
 Groundtruth: 67 configured-spelling occurrences in the real repo (adversary.js adds one `northwind` hit).
 

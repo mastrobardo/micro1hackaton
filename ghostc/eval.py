@@ -43,6 +43,44 @@ class Approach:
 
 
 @dataclass
+class Case:
+    """One evaluation case: a configured sensitive entity, scored identically on both trees.
+
+    The entity is the case unit because it is what the two approaches actually disagree
+    about — a keyword `sed` neutralises the spellings it was handed and leaks the rest,
+    so the per-entity residual is where the win is or isn't.
+    """
+    entity_id: str
+    kind: str
+    level: str
+    ghost: str
+    real_occurrences: int
+    baseline_residual: int
+    compile_residual: int
+
+    @property
+    def exercised(self) -> bool:
+        """False for a configured entity the fixture never actually uses — such a case
+        cannot distinguish the approaches, so it is reported but not scored."""
+        return self.real_occurrences > 0
+
+    @property
+    def passed(self) -> bool:
+        return self.exercised and self.compile_residual == 0
+
+    @property
+    def result(self) -> str:
+        if not self.exercised:
+            return "n/a — not present in fixture"
+        return "pass" if self.compile_residual == 0 else "FAIL"
+
+    @property
+    def hard(self) -> bool:
+        """Most spellings to get right — the challenging case."""
+        return self.baseline_residual > 0 and self.real_occurrences >= 20
+
+
+@dataclass
 class EvalResult:
     real: Path
     approaches: list[Approach]
@@ -51,6 +89,8 @@ class EvalResult:
     groundtruth_total: int
     real_residual_total: int
     real_strict_total: int
+    cases: list[Case] = field(default_factory=list)
+    cases_csv: Path | None = None
 
     def by_label(self, label: str) -> Approach:
         return next(a for a in self.approaches if a.label == label)
@@ -75,7 +115,19 @@ class EvalResult:
             for eid, n in sorted(base.residual_by_entity.items()):
                 lines.append(f"  {eid:<28} x{n}")
             lines.append("")
+        if self.cases:
+            scored = [c for c in self.cases if c.exercised]
+            n_pass = sum(1 for c in scored if c.passed)
+            n_base = sum(1 for c in scored if c.baseline_residual == 0)
+            hard = next((c.entity_id for c in self.cases if c.hard), None)
+            lines.append(f"cases: {len(scored)} scored  "
+                         f"clean under compile {n_pass}/{len(scored)}  "
+                         f"clean under baseline {n_base}/{len(scored)}"
+                         + (f"  (hard: {hard})" if hard else ""))
+            lines.append("")
         lines.append(f"report: {self.report_md}  +  {self.report_csv}")
+        if self.cases_csv is not None:
+            lines.append(f"cases:  {self.cases_csv}")
         verdict = "PASS" if comp.residual_total == 0 and base.residual_total > comp.residual_total \
             else "CHECK"
         lines.append(f"{verdict}: compile residual={comp.residual_total}, "
@@ -156,7 +208,7 @@ def run_eval(real: str, config_path: str = "privacy.yaml",
                  mapping_path=str(compile_p.parent / "private" / "mapping.json"),
                  audit_path=audit_path, detect=False)
 
-    real_residual_total, _ = _residual_scan(real_p, config_path)
+    real_residual_total, real_residual_by_entity = _residual_scan(real_p, config_path)
     real_strict_total, _ = _strict_scan(real_p, seeds)
     groundtruth_total = _groundtruth_total()
 
@@ -172,9 +224,20 @@ def run_eval(real: str, config_path: str = "privacy.yaml",
 
     report_md = Path(f"{report}.md")
     report_csv = Path(f"{report}.csv")
+    cases = _build_cases(seeds, real_residual_by_entity,
+                         approaches[0].residual_by_entity, approaches[1].residual_by_entity)
     result = EvalResult(real_p, approaches, report_md, report_csv,
-                        groundtruth_total, real_residual_total, real_strict_total)
+                        groundtruth_total, real_residual_total, real_strict_total,
+                        cases=cases, cases_csv=Path(f"{report}-cases.csv"))
     _write_reports(result)
+
+    for c in cases:
+        audit.emit("eval.case", "eval", subject={"entity": c.entity_id},
+                   decision="pass" if c.passed else "fail",
+                   details={"real_occurrences": c.real_occurrences,
+                            "baseline_residual": c.baseline_residual,
+                            "compile_residual": c.compile_residual,
+                            "hard": c.hard})
 
     base = result.by_label("baseline")
     comp = result.by_label("compile")
@@ -186,6 +249,22 @@ def run_eval(real: str, config_path: str = "privacy.yaml",
                         "baseline_strict": base.strict_total,
                         "compile_strict": comp.strict_total})
     return result
+
+
+def _build_cases(seeds: list[dict], real_by: dict[str, int],
+                 base_by: dict[str, int], comp_by: dict[str, int]) -> list[Case]:
+    """One case per configured entity, ordered most-exposed first."""
+    cases = [
+        Case(entity_id=e["id"],
+             kind=e.get("kind", "—"),
+             level=e.get("level", "—"),
+             ghost=e.get("ghost") or "<removed>",
+             real_occurrences=real_by.get(e["id"], 0),
+             baseline_residual=base_by.get(e["id"], 0),
+             compile_residual=comp_by.get(e["id"], 0))
+        for e in seeds
+    ]
+    return sorted(cases, key=lambda c: (-c.real_occurrences, c.entity_id))
 
 
 def _pct(base: int, comp: int) -> str:
@@ -235,6 +314,51 @@ def _write_reports(res: EvalResult) -> None:
         "|---|---|---|---|",
     ]
     md += [f"| {m} | {b} | {c} | {d} |" for m, b, c, d in rows]
+    if res.cases:
+        scored = [c for c in res.cases if c.exercised]
+        n_pass = sum(1 for c in scored if c.passed)
+        n_base = sum(1 for c in scored if c.baseline_residual == 0)
+        skipped = len(res.cases) - len(scored)
+        md += [
+            "",
+            "## Per-case results",
+            "",
+            f"**{n_pass}/{len(scored)}** cases clean under `compile`; "
+            f"**{n_base}/{len(scored)}** under the baseline."
+            + (f" ({skipped} configured entity/entities are absent from the fixture and "
+               f"cannot separate the approaches — listed, not scored.)" if skipped else ""),
+            "",
+            "The case unit is the **sensitive entity**: it is what the two approaches "
+            "actually disagree about. Both are given the same fixture and scored by the same "
+            "casing-aware scan, so every row is a like-for-like comparison. "
+            "*Occurrences* is what the detector sees in the **real** repo — the exposure each "
+            "approach has to neutralise. A case passes when `compile` leaves **0** residual.",
+            "",
+            "| # | Case (entity) | kind | level | ghost alias | occurrences (real) "
+            "| baseline residual | `compile` residual | result |",
+            "|---:|---|---|---|---|---:|---:|---:|---|",
+        ]
+        for i, c in enumerate(res.cases, 1):
+            label = f"`{c.entity_id}`" + (" **(hard)**" if c.hard else "")
+            md.append(
+                f"| {i} | {label} | {c.kind} | {c.level} | `{c.ghost}` "
+                f"| {c.real_occurrences} | {c.baseline_residual} | {c.compile_residual} "
+                f"| {c.result} |"
+            )
+        hard = [c for c in res.cases if c.hard]
+        if hard:
+            h = hard[0]
+            md += [
+                "",
+                f"**Challenging case — `{h.entity_id}`.** {h.real_occurrences} occurrences "
+                f"spread across code, config, env-var names, hostnames and prose, in spellings "
+                f"the config never lists literally. The baseline neutralises the spellings it "
+                f"was handed and still leaves **{h.baseline_residual}**; the casing engine "
+                f"normalises to one canonical entity and re-cases per occurrence, leaving "
+                f"**{h.compile_residual}**. This case is why the casing engine exists — see "
+                "the Improvement Changelog, Iteration 2.",
+            ]
+
     md += ["", "## Baseline residual leaks by entity", ""]
     if base.residual_by_entity:
         md += ["| entity | residual occurrences |", "|---|---|"]
@@ -257,6 +381,19 @@ def _write_reports(res: EvalResult) -> None:
         ",".join(_csv(x) for x in (m, b, c, d)) for m, b, c, d in rows
     ]
     res.report_csv.write_text("\n".join(csv_lines) + "\n", encoding="utf-8")
+
+    if res.cases_csv is not None:
+        case_lines = ["case,entity,kind,level,ghost_alias,real_occurrences,"
+                      "baseline_residual,compile_residual,hard,result"]
+        case_lines += [
+            ",".join(_csv(x) for x in (
+                str(i), c.entity_id, c.kind, c.level, c.ghost,
+                str(c.real_occurrences), str(c.baseline_residual), str(c.compile_residual),
+                "yes" if c.hard else "no",
+                c.result if c.exercised else "n/a"))
+            for i, c in enumerate(res.cases, 1)
+        ]
+        res.cases_csv.write_text("\n".join(case_lines) + "\n", encoding="utf-8")
 
 
 def _csv(value: str) -> str:

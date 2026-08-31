@@ -6,8 +6,8 @@ or any other home-folder memory for this project — keep everything in the repo
 
 ## Where things are
 
-- **`PROGRESS.md`** — running status, decision log, workflow diagram. Read first.
-- **`SESSION_TODO.md`** — the immediate next action + open questions.
+- **`docs/PROGRESS.md`** — running status, decision log, workflow diagram. Read first.
+- **`docs/SESSION_TODO.md`** — the immediate next action + open questions.
 - **`memory/`** — durable notes (one topic per file; `MEMORY.md` is the index).
 - **`TODO.md`** — the full 16-phase long-term roadmap.
 

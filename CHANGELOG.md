@@ -28,11 +28,17 @@ changelog's evidence source — the eval report is derived from it.
 
 ## Progression
 
-> The 10 eval cases + 1 hard case (`PROGRESS.md`) and the agent-run metrics (task pass rate,
-> approvals, time, cost) need the external-agent harness — **deferred to its own iteration**.
-> `ghostc eval` measures two live points: **Baseline = 28** and **current `compile` = 0**. The
-> middle rows are the design progression from 28 to 0 (each covered by its own tests), not
-> separately re-measured — marked "—".
+> **What is measured.** `ghostc eval` scores **13 cases** — one per configured sensitive
+> entity present in the fixture — with the same tree, the same scan and the same fixture for
+> both approaches: **baseline 7/13 clean, `compile` 13/13**, aggregate residual **28 → 0**.
+> Per-case table: `workspace/eval-report.md`; machine-readable
+> `workspace/eval-report-cases.csv`. The challenging case is `vendor_skyroute` (29
+> occurrences, 6 spellings; baseline leaves 11).
+>
+> The middle rows below are the design progression from 28 to 0 — each is covered by its own
+> tests but was not separately re-measured against the full case set, so its leak column reads
+> "—". The agent-run rows (task pass rate, approvals, time, cost) come from
+> `metrics/agent-runs.jsonl` on a live run, not from this fixture.
 
 | Stage | What we tried and why | Leak count (casing-aware) | Evidence | Decision / learning |
 |---|---|:---:|---|---|
@@ -44,6 +50,8 @@ changelog's evidence source — the eval report is derived from it.
 | **Iteration 5 — reverse patch compiler + eval harness** | `ghostc apply-patch`: ghost PR diff → real PR diff via the mapping + `privacy.yaml` match rules; fail-closed rejects (unmapped alias / real value present in the ghost diff / mapping-version mismatch / duplicate alias); `git apply --3way` onto a real branch. `ghostc eval`: builds both comparators and derives the leak metric from the audit log. | **0** (round-trip: real values restored, no alias survives into the real diff) | `tests/test_apply_patch.py`, `tests/test_eval.py`; `patch.*` / `eval.*` audit events | **Kept.** Closes the loop. Code tokens round-trip exactly; multi-word display names are flagged `lossy` for the downstream human review gate. |
 | **Final** | Combine the changes that worked: node-scoped + casing engine + verify gate + mapping memory + reverse compiler. | **0** vs baseline **28** | `workspace/eval-report.md`, `CHANGELOG.md` | Biggest single contributor: **the per-occurrence casing engine** (Iteration 2). A keyword `sed` and a node-scoped replace both leave every casing variant; re-casing one canonical alias is what neutralises them. |
 | **Iteration 6 — detection overhaul (`ghostc discover`)** | Candidate **scoring** model (noisy-OR over independent signals: exact / stem / import / declared-alias / reference-**graph** taint / bounded **fuzzy** (`rapidfuzz`) / structural **shapes** / **decode** pass / semantic) → each candidate gets a score in `[0,1]` and an `auto` / `review` / `ignore` action. New adversarial corpus `fixtures/inject/src/integrations/adversary.js` (fictional vendor *Meridian* + gateway operator *Contoso*, unconfigured on purpose — 20+ evasion forms: alias lists, `@scope/pkg`, env-var laundering, `x = y` alias chains, base64, split strings, case arrays). The compiler is now **threshold-driven**: `detection.auto_alias` off (default) → matcher output byte-identical, candidates written to a review queue; on → unconfigured `auto` candidates get a minted alias and are transformed (restricted still blocks). | Baseline **28** / `compile` **0** unchanged; `discover` on the fixture: **13/13** configured entities re-found from code alone, **Meridian 0.99** + **Contoso 0.83** proposed, **0** OSS libraries proposed | `tests/test_scoring.py`, `tests/test_discover.py`, `tests/test_compile.py` (detection block); `discover.candidate_scored` / `discover.entity_proposed` / `compile.candidate_review` audit events | **Kept.** Anchor-driven proposals (a new entity needs a scoped package / declared alias list / internal host / decoded name / graph taint — weak mentions only *attach* to an anchor) is what gives precision: `helmet` / `moment` / `swagger-jsdoc` never propose. Semantic tier is optional (`[semantic]` extra) with a stdlib n-gram fallback. **Follow-up:** `compile` now keeps package **import specifiers** (`require`/`import` args + `package.json` dep keys) verbatim rather than aliasing them — a renamed dependency does not resolve in the ghost env; first-party (`./`) specifiers still rewrite; kept ones are listed in `ghost-spec.md` + `compile.import_specifier_kept` audit; `rewrite_imports: true` per entity overrides. |
+
+| **Iteration 7 — per-case evaluation + trajectory capture** | Two gaps found by reading the submission against the brief. (a) The eval reported **two aggregate numbers**, which cannot show *which* changes helped — so `ghostc eval` now scores **one case per sensitive entity** (13 exercised on this fixture), same scan on both trees, with the hard case named and a configured-but-absent entity reported as `n/a` rather than counted as a free pass. (b) The agents' step-by-step behaviour existed only as run *summaries* — so `bridge/trajectory.py` records one line per tool call and per nudge, and `scripts/make-trajectories.py` renders `trajectories/` from the audit log + metrics rather than from memory. | baseline **7/13** cases clean · `compile` **13/13** (aggregate 28 → 0, unchanged) | `workspace/eval-report{,-cases}.csv`, `tests/test_eval.py` (per-case block), `tests/test_trajectory.py`, `tests/test_consultancy_trajectory.py`; `eval.case` audit events; `trajectories/` | **Kept.** The per-case view is what makes the win legible: the baseline is not uniformly bad, it is *fine on 7 entities and blind on 6* — every one of those 6 is a casing variant it was never literally given. Also surfaced a real gap: the ghost spec did not declare unconfigured surfaces left verbatim (`Meridian`, `Contoso`), so the ghost now explains itself instead of reading as an unexplained leak. |
 
 ## Removed experiments
 
@@ -75,5 +83,5 @@ git clone --depth 1 https://github.com/hagopj13/node-express-boilerplate.git ../
 python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 ghostc eval --real workspace/real      # -> workspace/eval-report.{md,csv}
 cat workspace/eval-report.md
-pytest -q                              # 205 passed, 1 skipped
+pytest -q                              # 324 passed, 2 skipped
 ```
