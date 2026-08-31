@@ -27,7 +27,7 @@ orchestrates. LangSmith tracing when `LANGSMITH_API_KEY` is set.
 | `ghostc/` | deterministic privacy compiler + `ghostc` CLI + `ghostc/spec.py` (compile_spec, was `agents/spec.py`) + `ghostc/mcp_server.py` | stdlib + tree-sitter etc. |
 | `bridge/` | boundary-neutral plumbing: `forge.py` (git `LocalBareForge`), `llm.py` (Claude/stub) | stdlib, `anthropic`, `langsmith` — **not** ghostc/client_agent/consultancy_agent |
 | `client_agent/` | company-side LangGraph orchestrator; `graph.py` (was `agents/client_graph.py`), `state.py`, `cli.py` (`ghostc-agent`), `graph.md` (mermaid) | `ghostc`, `bridge`, `consultancy_agent` |
-| `consultancy_agent/` | external agent; `sim.py` (Phase-B stand-in), `agent.py` (Phase C stub + `assert_boundary_clean`) | `bridge` only — **never** `ghostc`/`client_agent` (enforced by `tests/test_boundary.py`) |
+| `consultancy_agent/` | external agent; `sim.py` (Phase-B stand-in), `agent.py` (Phase C stub — **no runtime boundary self-check**; isolation is infra) | `bridge` only — **never** `ghostc`/`client_agent` (enforced by `tests/test_boundary.py`) |
 
 Entrypoints: `ghostc` (compiler), `ghostc-agent run-task | print-graph`, `ghostc-mcp`.
 Extras: `[agents]` = langgraph/langsmith/anthropic; `[mcp]` = `mcp>=2.0` (v2: `MCPServer`,
@@ -117,6 +117,113 @@ fail-closed gates; a `Rejection` short-circuits to `emit_metrics` and **no real 
 Verified end-to-end on the built fixture: ghost PR carries `client-a`/`service-a`/`vendor-a`;
 real PR carries `Northwind Airlines`/`booking-core`/`SkyRoute Data Ltd` (restored), with
 `client_northwind` + `vendor_skyroute` flagged `lossy` (multi-word display names).
+
+## Reduced hook-triggered E2E — shipped session 4 (2026-08-31), reworked to real repos
+
+**No synthesized forge. All git operations happen on the actual demo repos** (user
+directive: "as close to real life as possible; if a branch is created I need to check it on
+the target repo; a workspace/tmp is of no value"). Layout under `$GHOSTC_DEMO_ROOT`
+(default `../ghostc-demo`):
+
+```
+ghost.git/            bare "origin" — the git-server stand-in; post-receive hook lives here
+ghost/                the company ghost repo (ghostc compile output); remote origin → ../ghost.git
+ghost-consultancy/    the consultancy's OWN persistent clone of ghost.git (its working copy)
+ghost_task_<id>.consultancy.log   the hook's captured consultancy output (beside ghost-consultancy)
+```
+
+```
+client-agent start 001-add-companyx-integration --consultancy-backend claude
+  → plan → compile_spec → [leak gate]
+  → handoff  (in ../ghostc-demo/ghost:  fetch origin · checkout -B ghostc/task/<id> origin/main ·
+              write TASK.md at the root · commit as `ghostc-client <client@ghostc.local>` ·
+              `git push -f origin` ── fires ../ghostc-demo/ghost.git/hooks/post-receive ──
+              · checkout main)
+        post-receive → `python -m consultancy_agent._hook <backend> <ghost-consultancy>`
+                     → `consultancy-agent start --repo ../ghostc-demo/ghost-consultancy --branch <ref> --backend <b>`
+  → consultancy (own clone, ghost-only): fetch · checkout -B <ref> origin/<ref> · implement ·
+      commit as `Consultancy Dev <dev@consultancy.example>` (override CONSULTANCY_GIT_NAME/EMAIL) ·
+      `git push origin <ref>` (GHOSTC_NO_HOOK=1 → no re-trigger).  NO PR.
+  → await_consultancy  (in ghost/: fetch origin · read log origin/<ref> vs handoff_sha ·
+      `git branch -f <ref> origin/<ref>` so it is checkoutable · record authors + commit)
+  → emit_metrics   (STOP — no ghost PR, reverse_patch, verify, consistency, real PR)
+```
+
+You inspect it where you'd expect: `git -C ../ghostc-demo/ghost log --stat ghostc/task/<id>`
+— two actors: `ghostc-client` (the `task:` handoff commit) and `Consultancy Dev` (the `impl:`
+commit).
+
+- **`client_agent/localgit.py`** (new) — `git(cwd, *args, ident=)` + `ensure_ghost_origin(
+  ghost_repo, consultancy_repo, *, hook_backend, python)`: idempotently makes the bare origin
+  beside `ghost_repo`, wires `origin`, `push -u origin main`, installs `post-receive`
+  (`exec <py> -m consultancy_agent._hook <backend> <consultancy_repo>` — **no** mapping/client
+  path), and clones (or `fetch`es) the persistent `ghost-consultancy`. `CLIENT_IDENT` =
+  `ghostc-client <client@ghostc.local>`.
+- **`consultancy_agent/_hook.py`** — stdlib only now (no `bridge` import). Reads pushed
+  `refs/heads/ghostc/task/*` from stdin, runs `consultancy-agent start --repo <consultancy_repo>
+  --branch <ref>`, writes combined output to `<consultancy_repo>/../<ref>.consultancy.log`,
+  sets `GHOSTC_NO_HOOK=1` for the child. No cloning — the consultancy checkout is persistent.
+- **`consultancy_agent/agent.py`** — `_git` pins the consultancy identity
+  (`CONSULTANCY_GIT_NAME`/`CONSULTANCY_GIT_EMAIL`, default `Consultancy Dev <dev@consultancy.example>`),
+  strips `GIT_*`. `run()` does `fetch` → `checkout -B <branch> origin/<branch>` → implement →
+  commit → `push origin <branch>`. No `bridge.forge` import. Still: StubLLM → `_scripted_impl`
+  (deterministic `IMPL_NOTES.md`); real LLM → `_agent_loop` (JSON-action loop, `_MAX_STEPS=24`,
+  `@traceable("consultancy:agent")`, `role="consultancy"`).
+- **`client_agent/graph.py`** — `run_task(..., stop_after="develop", consultancy_backend=,
+  consultancy_repo=None, scratch_dir=".ghostc/scratch")`. Reduced path calls
+  `localgit.ensure_ghost_origin` then builds the graph with `forge=None`. `handoff` /
+  `await_consultancy` use `localgit` against `ghost_tree` (reduced) — the full path still uses
+  `LocalBareForge`. `state.py`: `handoff_sha` / `consultancy_pushed` / `consultancy_commit` /
+  `ghost_branch_in`; metrics gain `consultancy_authors`.
+- **`bridge/forge.py`** — reverted the session-4 additions (`install_consultancy_hook`,
+  `fetch`, `log_shas`, `bare_path`, `GIT_ENV`). Still used **only** by the full `run-task`
+  pipeline. `__init__` keeps `Path(root).resolve()`.
+- **Entrypoints:** `pyproject.toml` `[project.scripts]` += `client-agent` (= `ghostc-agent`,
+  same group) + `consultancy-agent`. Re-run `pip install -e .` for the console names; the hook
+  uses `python -m consultancy_agent` so it works without the re-install.
+- **`sim.py`** gained `open_pr: bool = True` (False → commit on the feature branch) — the
+  in-process stand-in the **full** graph still uses; the reduced flow no longer touches it.
+- **Spec:** `specs/001-add-companyx-integration.md` (ticket FLIGHT-142). Header
+  `task-id: 001-add-second-provider` is **boundary-neutral on purpose** — the id becomes the
+  `ghostc/task/<id>` branch name, visible to the consultancy side, so it must not carry a
+  real name. `CompanyX`→`partner-a` added to `privacy.webapp.yaml` (`[ticket:…]` note so
+  `test_webapp_config_covers_the_apps_entities` skips it — it is not in the app yet).
+- **Tests:** `tests/test_agentic_e2e.py` (2 — real-repo reduced flow on stub: branch on the
+  bare origin, two git identities, idempotent re-run, worktree left on main),
+  `tests/test_boundary.py` (also `consultancy_agent.cli` / `._hook`). `bridge/forge.py`'s
+  session-4 additions + their 2 tests removed. 260 pass / 1 skip.
+- **Still `assert_boundary_clean`-free** (removed session 3) — isolation is infra, not a
+  self-check.
+- **Idempotency:** reduced flow re-runs cleanly — `handoff` does `checkout -B <branch>
+  origin/main` + `push -f`, so a stale task branch on the bare is just force-updated. No
+  workspace to wipe (the full pipeline still wipes `--workspace`).
+
+**Follow-up fixes (after the first real invocations):**
+- **`workspace/` deprecated** ([[workspace-deprecated]]). The reduced flow now uses **no**
+  workspace at all (real repos under `../ghostc-demo/` + `.ghostc/{scratch,webapp-private}`
+  for the sanitized TASK.md + mapping/audit, gitignored, no git). The **full** pipeline still
+  uses `.ghostc/agent` for its synthesized forge. `ghostc/cli.py` defaults + scripts + docs
+  still say `workspace/` — pending migration.
+- `bridge/llm.py::get_llm` — an explicit `backend="stub"/"claude"` (e.g. `--consultancy-backend`)
+  now beats `GHOSTC_AGENT_BACKEND`; the env var only fills in for `backend="auto"`, and an
+  empty value is ignored. Before, `.env`'s `GHOSTC_AGENT_BACKEND=auto` silently overrode the flag.
+- **`_agent_loop` under-implements on real Claude** — an early run edited only `.env.example`
+  then stopped. The text-protocol ReAct loop over `bridge.llm.complete()` needs hardening
+  (or native Anthropic tool-use). C2/C3 work.
+- **Resilience (after a `529 Overloaded` killed a run):** `ClaudeLLM` now sets
+  `anthropic.Anthropic(max_retries=5)`; `_agent_loop._complete` adds an outer backoff on
+  transient errors (`overloaded`/`rate limit`/`timeout`/`5xx`/`529` in the message) and, if
+  it still fails, **returns the partial work** with a `stopped …: LLM error` summary instead
+  of raising — so `run()` still commits + pushes and the branch is never left empty. The
+  hook (`_hook.py`) writes the consultancy subprocess's combined output to
+  `<workdir>/<task_id>.consultancy.log` (a post-receive hook's stderr is swallowed by a
+  successful `git push`); `await_consultancy` tails that file into the `rejected` message +
+  the `agent.consultancy_developed` audit when no commit landed.
+
+**Not yet done:** a *complete* run with a real Anthropic key (loop hardening above). Next
+action = live-verify Claude + LangSmith for `role="client"` **and** `role="consultancy"` (two
+projects, two keys), then C3 (`npm test`/`build` metrics). Full checklist: `SESSION_TODO.md`
+→ `## DONE session 4`.
 
 ## Known / deferred
 

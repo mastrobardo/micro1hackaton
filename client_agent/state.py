@@ -22,6 +22,10 @@ class TaskState(TypedDict, total=False):
     substitutions: list[dict]      # [{entity_id, ghost, kind, level, count}] — no real values
 
     ghost_branch: str
+    handoff_sha: str               # tip of ghost_branch right after TASK.md was committed
+    consultancy_pushed: bool       # reduced flow: the consultancy committed on ghost_branch
+    consultancy_commit: str        # its tip sha (no real values)
+    ghost_branch_in: str | None    # ghost repo the finished branch was landed in (inspectable)
     ghost_pr: dict[str, Any] | None
     real_diff: str                 # boundary-internal
     real_pr: dict[str, Any] | None

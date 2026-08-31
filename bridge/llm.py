@@ -11,7 +11,9 @@ is present, the client is wrapped so every call is traced.
 * ``"auto"`` (default)     — Claude when an Anthropic key is set and the SDK
                              imports, else the stub
 
-Set ``GHOSTC_AGENT_BACKEND`` / ``GHOSTC_AGENT_MODEL`` to override in the env.
+``GHOSTC_AGENT_BACKEND`` fills in for a caller that left ``backend="auto"``; an
+explicit ``"stub"``/``"claude"`` (e.g. a ``--consultancy-backend`` flag) always
+wins. ``GHOSTC_AGENT_MODEL`` sets the Claude model.
 
 **Per-agent credentials.** Every entry point takes ``role`` — ``"client"`` (the
 company-side orchestrator: planning + the consistency gate) or ``"consultancy"``
@@ -92,7 +94,11 @@ class ClaudeLLM:
         import anthropic  # noqa: F401  (import error surfaces to the caller)
 
         self.model = model
-        client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        # bump the SDK's built-in retry (default 2) — 429 / 5xx / 529 overloaded are
+        # retried with backoff before an exception reaches us.
+        _kw = {"max_retries": 5}
+        client = (anthropic.Anthropic(api_key=api_key, **_kw) if api_key
+                  else anthropic.Anthropic(**_kw))
         try:
             if langsmith_api_key or os.environ.get("LANGSMITH_API_KEY"):
                 from langsmith.wrappers import wrap_anthropic
@@ -133,7 +139,11 @@ def get_llm(backend: str = "auto", model: str | None = None, *, role: str = "cli
     *role* selects which Anthropic / LangSmith key to use (see the module docstring).
     """
     _check_role(role)
-    backend = os.environ.get("GHOSTC_AGENT_BACKEND", backend)
+    # GHOSTC_AGENT_BACKEND fills in only when the caller did not ask for a specific
+    # backend (i.e. left it "auto"); an explicit "stub"/"claude" — e.g. a
+    # `--consultancy-backend` flag — always wins. An empty env value is ignored.
+    if backend == "auto":
+        backend = os.environ.get("GHOSTC_AGENT_BACKEND") or "auto"
     if backend == "stub":
         return StubLLM()
 

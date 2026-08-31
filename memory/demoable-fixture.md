@@ -40,14 +40,18 @@ Nair — ghost: Client A / Vendor A / service-a / Person A) with identical layou
 
 ## Next (C1 → C2 → C3)
 
-- **C1:** add `CompanyX` (kind `vendor` → `partner-a`/`PartnerA`) to `privacy.webapp.yaml`;
-  confirm `ghostc compile-spec` rewrites `fixtures/webapp/tasks/add-companyx-integration.md`
-  to name `PartnerA`, leak-clean.
-- **C2:** real Claude consultancy coding agent (`consultancy_agent/agent.py`) — tool-loop
-  scoped to the ghost checkout, `assert_boundary_clean` first, opens the ghost PR. Keep a
-  deterministic scripted fallback for offline/`--backend stub`.
-- **C3:** graph `verify` node runs `npm ci && npm test && npm run build` on an applied real
-  checkout; `agent.metrics` gains `ghost_build`/`ghost_tests`/`real_build`/`real_tests`.
+- **C1 — DONE (session 4).** `CompanyX` (kind `vendor` → `partner-a`/`PartnerA`) added to
+  `privacy.webapp.yaml` (`[ticket:…]` note). `ghostc compile-spec` on
+  `specs/001-add-companyx-integration.md` → `PartnerA` / `Client A` / `Vendor A` / `service-a`,
+  leak-clean (verified). The seed spec now lives at `specs/001-…` (not `fixtures/webapp/tasks/`).
+- **C2 — mostly DONE (session 4).** `consultancy_agent/agent.py` is real: Claude JSON-action
+  tool-loop (`role="consultancy"`, `@traceable`) + `--backend stub` scripted fallback, started
+  by the ghost bare repo's `post-receive` hook, commits on the feature branch, no PR. No
+  runtime boundary self-check. **Left:** run it with a real key and confirm it produces a
+  working CompanyX implementation (tests green) — that overlaps C3.
+- **C3:** graph runs `npm ci && npm test && npm run build` on the applied real checkout **and**
+  records the ghost-side result the consultancy last saw; `agent.metrics` gains
+  `ghost_build`/`ghost_tests`/`real_build`/`real_tests`.
 
 Full breakdown: `SESSION_TODO.md` → "NEXT SESSION — Phase C".
 Related: [[agent-harness]], [[working-preferences]], [[project-goal-and-status]].

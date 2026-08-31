@@ -73,7 +73,10 @@ class LocalBareForge:
     """File-backed forge. ``root`` holds ``<name>.git`` bares + ``work/<name>`` clones."""
 
     def __init__(self, root: str | Path, default_base: str = "main") -> None:
-        self.root = Path(root)
+        # Absolute: git runs with cwd set to a working clone / a bare repo, so every
+        # bare-repo path handed to `git` (clone source, hook targets) must not be
+        # relative to the process's cwd.
+        self.root = Path(root).resolve()
         self.default_base = default_base
         (self.root / "work").mkdir(parents=True, exist_ok=True)
 

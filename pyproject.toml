@@ -33,6 +33,8 @@ mcp = ["mcp>=2.0"]
 [project.scripts]
 ghostc = "ghostc.cli:main"
 ghostc-agent = "client_agent.cli:main"
+client-agent = "client_agent.cli:main"
+consultancy-agent = "consultancy_agent.cli:main"
 ghostc-mcp = "ghostc.mcp_server:main"
 
 [build-system]

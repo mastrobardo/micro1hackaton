@@ -4,16 +4,32 @@ Runs **inside** the trust boundary. Imports `ghostc` (deterministic privacy
 compiler) and `bridge` (git forge + LLM client). Never runs consultancy code —
 the handoff is a git push to a ghost remote.
 
-Entrypoint: `ghostc-agent run-task` (`client_agent/cli.py`). Graph: `graph.py`
-(diagram: `graph.md`, regenerate with `ghostc-agent print-graph`).
+Entrypoints (`client_agent/cli.py`, same Click group under two console names):
+
+- **`client-agent start <spec>`** — reduced, hook-triggered flow, **on the real repos**
+  (no synthesized forge). Resolves `<spec>` (bare name → `specs/<name>.md`, a path, or `-`
+  for stdin), derives the task id from a `task-id:` marker (else the filename stem — keep it
+  boundary-neutral, it becomes the branch name). First run creates a bare origin
+  `../ghostc-demo/ghost.git` beside the ghost repo + a `post-receive` hook + the
+  consultancy's own clone `../ghostc-demo/ghost-consultancy`. Then: `plan → compile_spec →
+  handoff` (in `../ghostc-demo/ghost`: branch `ghostc/task/<id>`, commit the sanitized
+  `TASK.md` as `ghostc-client`, `git push -f origin` → fires the hook) → the hook runs
+  `consultancy-agent start` against the consultancy clone, which commits as `Consultancy Dev`
+  and pushes → `await_consultancy` fetches the branch back → `emit_metrics`. **No PR.**
+  Inspect: `git -C ../ghostc-demo/ghost log --stat ghostc/task/<id>` (two actors). `--full`
+  runs the whole pipeline below instead (still `LocalBareForge`).
+- **`ghostc-agent run-task --task <file>`** — the full pipeline (ghost PR, reverse-patch,
+  verify, consistency, real-repo PR).
+- `ghostc-agent print-graph` — regenerate `graph.md` (both shapes).
 
 ## Node contracts
 
 | node | in | out | rule |
 |---|---|---|---|
 | `compile_spec` | real task, `privacy.yaml`, mapping store | `GhostSpec` + sanitized `TASK.md` | deterministic substitution (`ghostc.spec`); residual real value → fail-closed `Rejection`, `spec.rejected` audited, nothing written |
-| `handoff` | ghost tree, `TASK.md` | `ghostc/task/<id>` branch on the ghost remote | commits only the sanitized `TASK.md`; pushes |
-| `await_ghost_pr` | ghost remote | ghost PR record | Phase B: calls `consultancy_agent.sim`. Phase D: `interrupt()` resumed by a git hook |
+| `handoff` | ghost tree, `TASK.md` | `ghostc/task/<id>` branch | *reduced:* in `../ghostc-demo/ghost` — `checkout -B` the branch off `origin/main`, commit the sanitized `TASK.md` as `ghostc-client`, `git push -f origin` (fires the bare's `post-receive`), `checkout main`. *full:* via `LocalBareForge`. |
+| `await_consultancy` *(reduced)* | bare origin | recorded consultancy commit + authors | `git fetch origin`; confirm a commit landed on top of the `TASK.md` commit (the hook ran the consultancy synchronously); `git branch -f` so it is checkoutable; `agent.consultancy_developed`. No PR |
+| `await_ghost_pr` *(full)* | ghost remote | ghost PR record | calls `consultancy_agent.sim` in-process (opens a ghost PR). Phase D: `interrupt()` resumed by a git hook |
 | `reverse_patch` | ghost PR diff, mapping store | real diff | `ghostc.patch.reverse_patch`; unmapped alias / real value in ghost diff / version mismatch → fail-closed `Rejection` |
 | `verify` | real diff, real repo | pass / block | `git apply --check` (Phase F: full build gate over an applied tree) |
 | `consistency` | real task, real diff | `consistent` / `flagged` + flags | LLM (`bridge.llm`) or stub; advisory, feeds the human gate |

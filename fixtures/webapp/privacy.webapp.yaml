@@ -103,3 +103,18 @@ entities:
     ghost: ""
     note: "Fictional API key. Value removed; env var name retained."
     source: seed
+
+  # --- second data vendor (introduced by ticket FLIGHT-142) ----------
+  - id: vendor_companyx
+    real: "CompanyX"
+    match:
+      - { kind: literal, value: "CompanyX" }
+      - { kind: identifier, value: "companyX" }
+      - { kind: identifier, value: "companyx" }
+      - { kind: identifier, value: "COMPANYX" }
+    kind: vendor
+    level: confidential
+    strategy: semantic_alias
+    ghost: "partner-a"
+    note: "Fictional second flight-status vendor. [ticket: specs/001-add-companyx-integration.md] — not in the template app until the ticket is implemented."
+    source: seed

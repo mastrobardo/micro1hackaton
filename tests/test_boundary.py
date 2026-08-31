@@ -24,7 +24,8 @@ def test_no_forbidden_import_statement(path: Path):
             f"{path.relative_to(ROOT)} imports {name} — boundary violation"
 
 
-@pytest.mark.parametrize("mod", ["consultancy_agent.sim", "consultancy_agent.agent"])
+@pytest.mark.parametrize("mod", ["consultancy_agent.sim", "consultancy_agent.agent",
+                                 "consultancy_agent.cli", "consultancy_agent._hook"])
 def test_importing_consultancy_does_not_pull_the_privileged_side(mod: str):
     code = (f"import {mod}, sys; "
             "bad=[m for m in sys.modules if m=='ghostc' or m.startswith('ghostc.') "

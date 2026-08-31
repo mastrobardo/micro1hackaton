@@ -331,3 +331,50 @@ verbatim (a renamed package would not resolve in the ghost) — `compile` report
 un-aliased", and emits `compile.import_specifier_kept`. First-party specifiers (`./x`) still
 rewrite. If a *seed* entity name is in a specifier, `compile` warns that `verify` will BLOCK —
 set `rewrite_imports: true` on that entity, or exclude the file.
+
+## 12. Agent workflow — spec file → ghost branch → consultancy develops (reduced flow)
+
+Needs the `[agents]` extra (`pip install -e ".[agents]"`); offline with `--consultancy-backend stub`.
+
+```bash
+# build the ghost repo + mapping the flow reads (boundary-internal -> gitignored .ghostc/,
+# NOT under ../ghostc-demo/ next to the ghost tree). workspace/ is deprecated.
+./fixtures/webapp/apply.sh                     # -> ../ghostc-demo/real
+ghostc compile --repo ../ghostc-demo/real --config fixtures/webapp/privacy.webapp.yaml \
+    --out ../ghostc-demo/ghost --spec ../ghostc-demo/ghost-spec.md \
+    --mapping .ghostc/webapp-private/mapping.json \
+    --audit  .ghostc/webapp-private/audit.jsonl \
+    --candidates .ghostc/webapp-private/candidates.jsonl
+
+# a spec file lives in specs/ ; task-id in its header must be boundary-neutral
+# (it becomes the ghost branch name the consultancy side can see).
+client-agent start 001-add-companyx-integration --consultancy-backend stub
+# first run also sets up, beside ../ghostc-demo/ghost:
+#   ghost.git/          bare "origin" + post-receive hook   (the git-server stand-in)
+#   ghost-consultancy/  the consultancy's own clone of ghost.git
+# plan -> compile_spec (CompanyX -> PartnerA, Northwind -> Client A, ... ; leak-scanned, fail-closed)
+#      -> handoff: in ../ghostc-demo/ghost, branch ghostc/task/001-add-second-provider,
+#                  commit TASK.md as `ghostc-client`, `git push -f origin`  ── fires ──▶
+#            └─ ghost.git/hooks/post-receive:
+#               consultancy-agent start --repo ../ghostc-demo/ghost-consultancy --branch <ref>
+#               (commits as `Consultancy Dev`, pushes)
+#      -> await_consultancy: fetch the branch back into ../ghostc-demo/ghost, record it
+#      -> emit_metrics   (STOP — no ghost PR, no reverse-patch, no real PR)
+
+git -C ../ghostc-demo/ghost log --stat ghostc/task/001-add-second-provider   # inspect it
+```
+
+Two git identities on the branch: `ghostc-client <client@ghostc.local>` (the `task:` handoff
+commit) and `Consultancy Dev <dev@consultancy.example>` (the `impl:` commit — override with
+`CONSULTANCY_GIT_NAME` / `CONSULTANCY_GIT_EMAIL`).
+
+`--full` runs the whole pipeline instead (ghost PR → reverse-patch → verify → consistency →
+real-repo PR; still uses a synthesized `LocalBareForge` under `.ghostc/agent`). The
+consultancy side uses `role="consultancy"` for its Claude key + LangSmith project
+(`ghostc-consultancy`); the client uses `role="client"`. Set `CONSULTANCY_ANTHROPIC_API_KEY` /
+`CLIENT_ANTHROPIC_API_KEY` (or one bare `ANTHROPIC_API_KEY`) and the matching `*_LANGSMITH_*`
+vars in `.env` — see `.env.example`.
+
+```bash
+ghostc-agent print-graph        # regenerate client_agent/graph.md (full + reduced diagrams)
+```

@@ -15,6 +15,9 @@ htmlcov/
 # --- Pipeline working area (not part of the solution) ---
 # real-repo copy, generated ghost repo, mapping store, audit log, eval output
 workspace/
+# agent-workflow working area (git remotes, scratch) + boundary-internal artifacts
+# (mapping = real values, audit). workspace/ is deprecated — see memory/workspace-deprecated.md
+.ghostc/
 
 # --- Secrets (ground rule 08) ---
 # note: *.env.example / .env.example ARE tracked — placeholders only, no real values
