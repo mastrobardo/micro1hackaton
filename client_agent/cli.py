@@ -86,9 +86,29 @@ def main() -> None:
 @click.option("--metrics-file", default=None, type=click.Path(),
               help="Per-run metrics JSONL sink (default: metrics/agent-runs.jsonl "
                    "or $GHOSTC_METRICS_FILE).")
+@click.option("--screen-mode", type=click.Choice(["block", "warn", "off"]),
+              default="block", show_default=True,
+              help="Outbound screen for entities privacy.yaml never named: block "
+                   "(gate the run), warn (record only), off.")
+@click.option("--screen-llm", type=click.Choice(["best-effort", "required", "off"]),
+              default="best-effort", show_default=True,
+              help="Client-side LLM adjudicator inside the screen. best-effort: run it "
+                   "when a client key is set, else gate deterministically; required: "
+                   "refuse to run without a real model.")
+@click.option("--candidates", "candidates_path", default=None, type=click.Path(),
+              help="candidates.jsonl from `ghostc discover` — lets the screen recognise "
+                   "names the scorer already proposed but nobody froze into the config.")
+@click.option("--decisions", "decisions_path", default=None, type=click.Path(),
+              help="Human review log (decisions.jsonl): an `ignore` here permanently "
+                   "suppresses that screen finding.")
+@click.option("--findings", "findings_path", default=None, type=click.Path(),
+              help="Append screen findings to this boundary-internal JSONL "
+                   "(feeds the review board).")
 def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree: str,
                  config_path: str, mapping_path: str, audit_path: str, workspace: str,
-                 backend: str, metrics_file: str | None) -> None:
+                 backend: str, metrics_file: str | None, screen_mode: str,
+                 screen_llm: str, candidates_path: str | None,
+                 decisions_path: str | None, findings_path: str | None) -> None:
     """Run one task: real task -> ghost branch + TASK.md -> ghost PR -> reverse-patch ->
     real-repo PR (human review). Fail closed."""
     try:
@@ -109,7 +129,9 @@ def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree
     state = run_task(text, task_id=tid, real_repo=real_repo, ghost_tree=ghost_tree,
                      config_path=config_path, mapping_path=mapping_path,
                      audit_path=audit_path, workspace=workspace, backend=backend,
-                     metrics_file=metrics_file)
+                     metrics_file=metrics_file, screen_mode=screen_mode,
+                     screen_llm=screen_llm, candidates_path=candidates_path,
+                     decisions_path=decisions_path, findings_path=findings_path)
 
     m = state.get("metrics", {})
     if state.get("rejected"):
@@ -123,6 +145,8 @@ def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree
     click.echo(f"  consistency:  {m.get('consistency')}  {m.get('consistency_flags') or ''}")
     click.echo(f"  entities:     resolved={m.get('entities_resolved') or []}  "
                f"lossy={m.get('lossy_entities') or []}")
+    click.echo(f"  screen:       {m.get('screen_findings', 0)} finding(s)  "
+               f"mode={m.get('screen_mode')}  adjudicator={m.get('screen_llm')}")
     click.echo(f"  llm:          {m.get('llm_model')}  {m.get('llm_tokens')} tok")
     click.echo(f"  wall-clock:   {m.get('wall_clock_s')}s")
     click.echo("  -> HUMAN REVIEW REQUIRED before merge")
@@ -158,10 +182,30 @@ def run_task_cmd(task_path: str, task_id: str | None, real_repo: str, ghost_tree
                    "or $GHOSTC_METRICS_FILE). The post-receive hook forwards it so the "
                    "consultancy writes into the same sink.")
 @click.option("--task-id", default=None, help="Override the id derived from the spec.")
+@click.option("--screen-mode", type=click.Choice(["block", "warn", "off"]),
+              default="block", show_default=True,
+              help="Outbound screen for entities privacy.yaml never named: block "
+                   "(gate the run), warn (record only), off.")
+@click.option("--screen-llm", type=click.Choice(["best-effort", "required", "off"]),
+              default="best-effort", show_default=True,
+              help="Client-side LLM adjudicator inside the screen. best-effort: run it "
+                   "when a client key is set, else gate deterministically; required: "
+                   "refuse to run without a real model.")
+@click.option("--candidates", "candidates_path", default=None, type=click.Path(),
+              help="candidates.jsonl from `ghostc discover` — lets the screen recognise "
+                   "names the scorer already proposed but nobody froze into the config.")
+@click.option("--decisions", "decisions_path", default=None, type=click.Path(),
+              help="Human review log (decisions.jsonl): an `ignore` here permanently "
+                   "suppresses that screen finding.")
+@click.option("--findings", "findings_path", default=None, type=click.Path(),
+              help="Append screen findings to this boundary-internal JSONL "
+                   "(feeds the review board).")
 def start_cmd(spec: str, full: bool, config_path: str, ghost_tree: str, real_repo: str,
               mapping_path: str, audit_path: str, consultancy_repo: str | None,
               workspace: str, backend: str, consultancy_backend: str,
-              metrics_file: str | None, task_id: str | None) -> None:
+              metrics_file: str | None, task_id: str | None, screen_mode: str,
+              screen_llm: str, candidates_path: str | None, decisions_path: str | None,
+              findings_path: str | None) -> None:
     """Drive a spec file through the workflow: real task -> sanitized TASK.md on a ghost
     feature branch -> post-receive hook -> consultancy develops the branch (no PR)."""
     try:
@@ -183,7 +227,10 @@ def start_cmd(spec: str, full: bool, config_path: str, ghost_tree: str, real_rep
                      audit_path=audit_path, workspace=workspace, backend=backend,
                      consultancy_backend=consultancy_backend,
                      consultancy_repo=consultancy_repo, metrics_file=metrics_file,
-                     stop_after=None if full else "develop")
+                     stop_after=None if full else "develop",
+                     screen_mode=screen_mode, screen_llm=screen_llm,
+                     candidates_path=candidates_path, decisions_path=decisions_path,
+                     findings_path=findings_path)
 
     m = state.get("metrics", {})
     if state.get("rejected"):
@@ -295,6 +342,7 @@ def print_graph(out: str) -> None:
         "|---|---|---|\n"
         "| `plan` | start the run, record backend + start time | `agent.task_started` |\n"
         "| `compile_spec` | `ghostc.spec.compile_spec` → sanitized `TASK.md`. **Fail-closed gate.** | `spec.compiled` / `spec.rejected` |\n"
+        "| `screen` | `ghostc.screen.screen_text` over the *compiled* task: structural shapes + standing `discover` proposals + the client-side LLM adjudicator (`client_agent/screen_llm.py`), scored by the same noisy-OR as `discover`. Catches the entities `privacy.yaml` never named — the ones `compile_spec` is blind to by construction. **Fail-closed gate** (`--screen-mode block`, the default). | `screen.scanned` / `screen.blocked` |\n"
         "| `handoff` | *(reduced)* in `../ghostc-demo/ghost`: branch `ghostc/task/<id>`, commit the sanitized `TASK.md` as `ghostc-client`, `git push -f origin` — which fires the bare origin's `post-receive` hook. *(full)* same via `LocalBareForge`. | `agent.spec_handoff` |\n"
         "| `await_consultancy` | *(reduced)* `git fetch origin`; confirm the hook's consultancy run pushed a commit on top of the `TASK.md` commit; `git branch -f` so it is checkoutable; record authors | `agent.consultancy_developed` |\n"
         "| `await_ghost_pr` | *(full)* consultancy implements + opens a **ghost PR** (`consultancy_agent.sim`) | `agent.ghost_pr_opened` |\n"
@@ -305,7 +353,18 @@ def print_graph(out: str) -> None:
         "| `emit_metrics` | assemble the metrics row; also the sink for every fail-closed short-circuit | `agent.metrics`, `agent.task_completed` |\n\n"
         "Dotted edges are the fail-closed short-circuits: on any `Rejection` / block the "
         "run skips straight to `emit_metrics` and **no PR is opened**. `handoff` is the "
-        "only node that writes to the ghost side — the privacy boundary is on that wire.\n")
+        "only node that writes to the ghost side — the privacy boundary is on that wire, "
+        "and `compile_spec` → `screen` are the two gates in front of it.\n\n"
+        "### Why two gates\n\n"
+        "`compile_spec` is **closed-world**: it substitutes the entities `privacy.yaml` "
+        "and `mapping.json` name, and its leak scan looks for those same real spellings. "
+        "A name nobody ever configured is invisible to both and crosses untouched. "
+        "`screen` is the open-world half — it scores the compiler's *output*, so every "
+        "finding is by construction something the closed world did not cover. Its "
+        "deterministic layer (shapes, standing `discover` proposals) is precision-first "
+        "and offline; the LLM adjudicator adds recall on prose, may only **accuse**, and "
+        "has every claim anchored back into the outbound text before it can score. "
+        "Nothing in `screen` transforms anything — it queues and it blocks.\n")
     Path(out).write_text(
         "# Client agent — LangGraph\n\n"
         "Auto-generated by `ghostc-agent print-graph`. Topology in "

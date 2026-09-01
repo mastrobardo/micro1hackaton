@@ -1,11 +1,69 @@
-# Session TODO — handoff (updated 2026-08-31, end of session 9)
+# Session TODO — handoff (updated 2026-09-01, end of session 10)
 
 Start-here checklist for the next session. Running status + decision log: **`PROGRESS.md`
 (read first)**. Durable notes: `memory/` (index `memory/MEMORY.md`). Long-term plan:
 `TODO.md`. Conventions + "memory stays in-repo": `CLAUDE.md`.
 
-`pytest` → **~302 passed, 1 skipped**. Working tree uncommitted (user commits per iteration).
-Branch: `feat/006_reverse-pr-and-metrics`.
+`pytest` → **369 passed, 2 skipped**. Working tree uncommitted (user commits per iteration).
+Branch: `feat/009_example_prs`.
+
+---
+
+## DONE session 10 — the outbound screen (detect / score / gate on the wire)
+
+`ghostc/screen.py` + `client_agent/screen_llm.py` + the `screen` graph node +
+`ghostc screen` CLI + `screen` MCP tool + `specs/002-onboard-halcyon-cargo.md` +
+`tests/test_screen{,_llm}.py` (+35) + graph tests (+7) + `screen.scanned`/`screen.blocked`
+in the audit schema. `pytest` 369/2.
+
+**The gap it closes.** `compile_spec` is **closed-world**: it substitutes the entities
+`privacy.yaml` + `mapping.json` name, and its fail-closed gate leak-scans for *those same
+real spellings* (`ghostc/spec.py::_known_real_spellings`). A partner nobody ever
+configured is invisible to the redactor **and** to its own gate, and crosses untouched.
+`ghostc discover` had the scorer that catches this — but only as a manual pass over a
+**repo**, never on the wire.
+
+- **`ghostc/screen.py`** (deterministic, import-light, no LLM) — `screen_text(text, *,
+  real_text, adjudicator=None, mode="block", ...) -> ScreenResult`. Three layers folded
+  into the *same* `combine_score` + `classify` as `discover`: structural shapes
+  (`detect/shapes.py`), standing (unfrozen) `discover` proposals from `candidates.jsonl`,
+  and an **injected** adjudicator. Ghost aliases from the config + mapping are suppressed
+  (`_known_ghosts`) so the compiler's own output never gates. Emits `screen.scanned` /
+  `screen.blocked` (hash-only). `write_findings()` writes the `Candidate` shape.
+- **`client_agent/screen_llm.py`** — the adjudicator. Lives here, **not** in `ghostc/`,
+  because `ghostc` may not import `bridge` (`tests/test_boundary.py`). Prompt carries the
+  real task *and* the ghost task and asks which spellings in the ghost half still refer to
+  something real. `build_adjudicator(backend, mode=...)` → `best-effort` (default; returns
+  `(None, {"status": "skipped"})` on the stub so offline CI stays green) / `required` /
+  `off`.
+- **The `screen` node** sits between `compile_spec` and `handoff` in **both** graph shapes
+  — before the only node that writes ghost-side. `_after_screen` short-circuits to
+  `emit_metrics`. Flags: `--screen-mode block|warn|off`, `--screen-llm
+  best-effort|required|off`, `--candidates`, `--decisions`, `--findings` on `run-task`
+  and `start`.
+
+**Invariants worth not breaking:**
+
+- No screen signal is in `candidate._HARD_SIGNALS`, so `classify` can only return
+  `review` / `ignore` here — **the screen never auto-transforms anything.** If you ever add
+  a hard signal to it, that changes.
+- Every adjudicator claim is re-anchored into the outbound text with `anchored_scan`
+  before it can score; unanchored claims are dropped and counted (`screen_llm_dropped`).
+  The LLM signal is capped at `W_LLM_CAP = 0.60`, below `auto_threshold`.
+- `_restricted_floor` queues a **structural** hit at a `restricted` level even below
+  `review_threshold` (the email shape is 0.35, tuned for repos). Not applied to the
+  adjudicator on purpose.
+- A reviewer `accept` in `decisions.jsonl` **keeps blocking** — only `ignore` suppresses.
+  An accepted entity has to reach `privacy.yaml` before the compiler can act on it.
+
+**Verified live (Opus 5, client role):** `specs/002` → 4 findings deterministic, **7** with
+the adjudicator (`Halcyon Freight` / `HalcyonClient` / `halcyonClient.js` are LLM-only —
+prose with no anchor), 0 hallucinated claims, ~4.3k tokens, one call. `specs/001` (the
+clean demo spec) → **0** findings on both layers, so the demo path is unaffected.
+
+**Watch for:** `screen_findings` in `TaskState` quotes real surfaces — boundary-internal,
+like `real_task`; only `metrics` is publishable. The screen runs on the *ghost task* only;
+the reverse direction (screening a consultancy diff on the way back in) is not wired.
 
 ---
 

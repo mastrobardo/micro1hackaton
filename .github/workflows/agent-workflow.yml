@@ -2,8 +2,9 @@ name: agent-workflow
 
 # Two jobs:
 #   checks     — deterministic, offline, no secrets: compile / verify / eval /
-#                pytest + a leak-count regression gate; publishes the eval report
-#                and the per-run metrics as build artifacts.
+#                pytest + a leak-count regression gate + the outbound-screen gate
+#                (clean spec passes, seeded leaky spec is blocked); publishes the
+#                eval report and the per-run metrics as build artifacts.
 #   roundtrip  — runs the verified reduced flow (sanitized ghost task branch ->
 #                consultancy develops -> reverse-compile onto the real repo) and
 #                opens the two PRs a judge inspects on the throwaway demo repos.
@@ -60,6 +61,26 @@ jobs:
           ghostc eval --real workspace/real --config privacy.yaml
       - name: leak-count regression gate
         run: python scripts/ci/check_leak_gate.py workspace/eval-report.csv
+      - name: outbound screen gate (both directions)
+        # `compile-spec` is closed-world; `screen` is what catches an entity nobody
+        # configured. Assert BOTH: the clean spec must not be blocked (no false
+        # positive on the demo path) and the seeded leaky spec must be.
+        run: |
+          set -euo pipefail
+          screen() {
+            ghostc compile-spec --task "specs/$1.md" --config privacy.yaml \
+              --mapping workspace/private/mapping.json --out "/tmp/$1.ghost.md" >/dev/null
+            ghostc screen --text "/tmp/$1.ghost.md" --config privacy.yaml \
+              --mapping workspace/private/mapping.json \
+              --candidates workspace/private/candidates.jsonl
+          }
+          screen 001-add-companyx-integration
+          echo "clean spec passed the screen"
+          if screen 002-onboard-halcyon-cargo; then
+            echo "SCREEN GATE FAILED: the seeded leaky spec was not blocked" >&2
+            exit 1
+          fi
+          echo "leaky spec blocked as expected"
       - name: pytest
         run: pytest -q
       - uses: actions/upload-artifact@v4

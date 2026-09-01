@@ -325,8 +325,10 @@ def _write_reports(res: EvalResult) -> None:
             "",
             f"**{n_pass}/{len(scored)}** cases clean under `compile`; "
             f"**{n_base}/{len(scored)}** under the baseline."
-            + (f" ({skipped} configured entity/entities are absent from the fixture and "
-               f"cannot separate the approaches — listed, not scored.)" if skipped else ""),
+            + ((f" ({skipped} configured "
+                + ("entity is" if skipped == 1 else "entities are")
+                + " absent from the fixture and cannot separate the approaches — "
+                  "listed, not scored.)") if skipped else ""),
             "",
             "The case unit is the **sensitive entity**: it is what the two approaches "
             "actually disagree about. Both are given the same fixture and scored by the same "

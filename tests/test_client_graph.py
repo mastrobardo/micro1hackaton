@@ -75,7 +75,7 @@ def test_full_loop_opens_a_real_pr(bench):
     assert m["wall_clock_s"] is not None
 
     ev = _events(bench["audit_path"])
-    for e in ("agent.task_started", "spec.compiled", "agent.spec_handoff",
+    for e in ("agent.task_started", "spec.compiled", "screen.scanned", "agent.spec_handoff",
               "agent.ghost_pr_opened", "consistency.verdict", "agent.real_pr_opened",
               "approval.requested", "agent.metrics", "agent.task_completed"):
         assert e in ev, f"missing audit event {e}"
@@ -109,3 +109,88 @@ def test_missing_precondition_is_a_clean_error(bench):
     bench["mapping_path"] = bench["mapping_path"] + ".nope"
     with pytest.raises(SystemExit):
         run_task(TASK, task_id="x", backend="stub", **bench)
+
+
+# --- the screen gate (unknown entities the closed-world compiler cannot see) --- #
+
+LEAKY = ("Add a GET /healthz endpoint for Northwind Airlines that also pings "
+         "gw.prod.contoso.internal and returns 200.")
+
+
+def test_screen_blocks_an_unknown_entity_before_the_handoff(bench):
+    """`gw.prod.contoso.internal` is in neither privacy.yaml nor the mapping, so
+    compile_spec passes it through untouched and its leak scan cannot see it. The
+    screen is what stops it — before `handoff`, the only node that writes ghost-side."""
+    state = run_task(LEAKY, task_id="leak", backend="stub", **bench)
+
+    assert state.get("rejected", "").startswith("screen:")
+    assert state.get("ghost_branch") is None and state.get("real_pr") is None
+    m = state["metrics"]
+    assert m["screen_blocked"] is True and m["screen_findings"] >= 1
+    assert m["screen_llm"] == "skipped"          # stub backend -> deterministic only
+
+    ev = _events(bench["audit_path"])
+    assert "screen.scanned" in ev and "screen.blocked" in ev
+    assert "agent.spec_handoff" not in ev and "agent.real_pr_opened" not in ev
+
+
+def test_screen_findings_stay_boundary_internal(bench):
+    state = run_task(LEAKY, task_id="leak", backend="stub", **bench)
+    # the findings name the real surface ...
+    assert any("contoso" in f["surface"] for f in state["screen_findings"])
+    # ... the audit log and the metrics row do not
+    assert "contoso" not in Path(bench["audit_path"]).read_text(encoding="utf-8")
+    assert "contoso" not in json.dumps(state["metrics"])
+
+
+def test_warn_mode_records_without_gating(bench):
+    state = run_task(LEAKY, task_id="warn", backend="stub", screen_mode="warn", **bench)
+    assert not state.get("rejected")
+    assert state["real_pr"]["id"] and state["metrics"]["screen_findings"] >= 1
+    assert state["metrics"]["screen_blocked"] is False
+
+
+def test_screen_off_skips_the_gate(bench):
+    state = run_task(LEAKY, task_id="off", backend="stub", screen_mode="off", **bench)
+    assert not state.get("rejected") and state["metrics"]["screen_findings"] == 0
+
+
+def test_reviewer_ignore_lets_the_run_through(bench, tmp_path):
+    """The review board closes the loop: a cleared false positive stops gating."""
+    from ghostc.review.store import DecisionStore
+
+    d = tmp_path / "decisions.jsonl"
+    DecisionStore(d).record(surface="gw.prod.contoso.internal", reviewer_action="ignore",
+                            proposed_action="review", note="decommissioned host")
+    state = run_task(LEAKY, task_id="cleared", backend="stub",
+                     decisions_path=str(d), **bench)
+    assert not state.get("rejected") and state["real_pr"]["id"]
+    assert state["metrics"]["screen_suppressed"] == 1
+
+
+def test_findings_file_feeds_the_review_board(bench, tmp_path):
+    out = tmp_path / "screen-findings.jsonl"
+    run_task(LEAKY, task_id="f", backend="stub", findings_path=str(out), **bench)
+    rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines()]
+    assert rows and rows[0]["source"] == "ghost_task"
+
+
+def test_adjudicator_failure_is_reported_as_error_not_ran(bench, monkeypatch):
+    """A blown-up adjudicator must not be recorded as a clean run — the cost fields
+    are merged back onto the result, the status is not."""
+    import client_agent.graph as g
+
+    class Boom:
+        model = "fake"
+
+        def __call__(self, ghost, real):
+            raise RuntimeError("529 overloaded")
+
+        def info(self):
+            return {"status": "ran", "model": "fake", "calls": 1, "tokens": 7}
+
+    monkeypatch.setattr(g, "build_adjudicator",
+                        lambda backend, mode: (Boom(), {"status": "ran"}))
+    state = run_task(TASK, task_id="boom", backend="stub", **bench)
+    assert state["metrics"]["screen_llm"] == "error"
+    assert state["metrics"]["llm_tokens"] >= 7      # the cost still counted

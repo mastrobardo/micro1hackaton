@@ -332,7 +332,107 @@ un-aliased", and emits `compile.import_specifier_kept`. First-party specifiers (
 rewrite. If a *seed* entity name is in a specifier, `compile` warns that `verify` will BLOCK —
 set `rewrite_imports: true` on that entity, or exclude the file.
 
-## 12. Agent workflow — spec file → ghost branch → consultancy develops (reduced flow)
+## 12. Screen — the outbound gate for entities the config never named
+
+`compile` and `compile-spec` are **closed-world**: they substitute the entities
+`privacy.yaml` + `mapping.json` name, and their fail-closed leak scan looks for those same
+real spellings. A partner nobody ever configured is invisible to both and crosses
+untouched. `screen` is the second gate — it scores the compiler's *output*, so every
+finding is by construction something the closed world did not cover.
+
+```bash
+# the clean path: the seeded spec compiles and screens clean
+ghostc compile-spec --task specs/001-add-companyx-integration.md \
+    --config fixtures/webapp/privacy.webapp.yaml \
+    --mapping .ghostc/webapp-private/mapping.json --out /tmp/ghost-task.md
+ghostc screen --text /tmp/ghost-task.md \
+    --config fixtures/webapp/privacy.webapp.yaml \
+    --mapping .ghostc/webapp-private/mapping.json \
+    --candidates .ghostc/webapp-private/candidates.jsonl
+# screen:      CLEAN  (/tmp/ghost-task.md, mode=block)
+# findings:    0 flagged / 0 scored
+```
+
+Now the spec that exists to be blocked (`specs/002-onboard-halcyon-cargo.md` — a ticket
+naming a partner that is *not* in the config):
+
+```bash
+ghostc compile-spec --task specs/002-onboard-halcyon-cargo.md \
+    --config fixtures/webapp/privacy.webapp.yaml \
+    --mapping .ghostc/webapp-private/mapping.json --out /tmp/h.md
+ghostc screen --text /tmp/h.md --config fixtures/webapp/privacy.webapp.yaml \
+    --mapping .ghostc/webapp-private/mapping.json \
+    --candidates .ghostc/webapp-private/candidates.jsonl ; echo "exit=$?"
+```
+
+```
+screen:      BLOCK  (/tmp/h.md, mode=block)
+findings:    4 flagged / 4 scored
+adjudicator: off
+
+  surface                                 score  action  kind/level                     evidence
+  hal_live_9f8e7d6c5b4a3210                0.55  review  secret/restricted              structural shape
+  HAL-CF-2026-01                           0.45  review  infra_identifier/confidential  structural shape
+  gw.prod.halcyon.internal                 0.45  review  domain/confidential            structural shape
+  dispatch.lead@halcyonfreight.example     0.35  review  person/restricted              structural shape
+
+BLOCKED: 4 unscreened finding(s) in the outbound /tmp/h.md; strongest: structural shape @ 0.55
+exit=1
+```
+
+`ghostc screen` is the deterministic layer only — `ghostc` proper stays LLM-free. Inside
+the agent workflow the same call gets a **client-side LLM adjudicator**
+(`client_agent/screen_llm.py`), which is shown the real task and the ghost task and asked
+which spellings still refer to something real. On the same input it adds:
+
+```
+  hal_live_9f8e7d6c5b4a3210                0.81  review  secret/restricted   llm + structural shape
+  ...
+  Halcyon Freight                          0.58  review  vendor/internal     llm
+  HalcyonClient                            0.51  review  vendor/internal     llm
+  halcyonClient.js                         0.45  review  vendor/internal     llm
+```
+
+The last three are the point. The deterministic detector proposes an unconfigured entity
+only from an **anchor** (a scoped package, an internal host, a declared alias list, graph
+taint) — which is exactly what keeps `helmet` and `swagger-jsdoc` out of `discover`'s
+proposals, and exactly why a partner's name in an English sentence is invisible to it.
+
+### The rules that keep the model honest
+
+- **It may accuse, never decide.** Every surface it names is re-anchored into the outbound
+  text with `anchored_scan` before it can score — a claim that only exists in the real half
+  of its prompt, or in its imagination, is dropped and counted (`screen_llm_dropped`).
+- **Its signal is capped at 0.60**, below `detection.auto_threshold`. An accusation can send
+  something to human review; it can never clear or transform anything. Nor can any other
+  screen signal: none of them are *hard* signals, so `classify` can only return
+  `review` / `ignore` here.
+- **Availability never weakens the gate silently.** `--screen-llm best-effort` (default)
+  runs it when a client key is present and records `screen_llm: skipped` when it is not —
+  the deterministic layer still gates. `--screen-llm required` refuses to run without a
+  real model; `off` removes the layer.
+
+### Policy + the review loop
+
+```bash
+ghostc screen --text /tmp/h.md ... --mode warn      # score and report, never gate
+ghostc screen --text /tmp/h.md ... --threshold 0.6  # raise the bar for one run
+ghostc screen --text /tmp/h.md ... --out workspace/private/screen-findings.jsonl
+ghostc-review --candidates workspace/private/screen-findings.jsonl   # triage them
+```
+
+The findings file is the `Candidate` shape, so the session-9 review board reads it with no
+new code. A reviewer `ignore` in `decisions.jsonl` suppresses that surface permanently
+(`--decisions <path>`); an `accept` deliberately keeps blocking — an accepted entity belongs
+in `privacy.yaml`, and until it is there the compiler still cannot substitute it.
+
+**`restricted` never crosses unreviewed.** The email shape weighs 0.35 — under
+`review_threshold` — because in a *repo* an address is usually a package author. In an
+outbound ticket it is a person, so a structural hit at a `restricted` level is queued even
+when the noisy-OR score is below the line. (That floor is deliberately not extended to the
+adjudicator: a shape is a fact about the text, a model's claim is an opinion.)
+
+## 13. Agent workflow — spec file → ghost branch → consultancy develops (reduced flow)
 
 Needs the `[agents]` extra (`pip install -e ".[agents]"`); offline with `--consultancy-backend stub`.
 

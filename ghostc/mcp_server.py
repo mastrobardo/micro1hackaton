@@ -22,9 +22,9 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised via ghostc-mc
 
 server = MCPServer("ghostc", instructions=(
     "Deterministic privacy-compiler tools. compile_spec sanitizes an implementation "
-    "task; discover scores sensitive-entity candidates in a repo; verify leak-scans a "
-    "ghost tree; apply_patch reverse-compiles a ghost PR diff to a real diff. "
-    "All fail closed."))
+    "task; screen scores outbound text for entities the config never named; discover "
+    "scores sensitive-entity candidates in a repo; verify leak-scans a ghost tree; "
+    "apply_patch reverse-compiles a ghost PR diff to a real diff. All fail closed."))
 
 
 @server.tool()
@@ -42,6 +42,28 @@ def compile_spec(task: str, config_path: str = "privacy.yaml",
         return {"ok": False, "error": str(rej), "rejected": True}
     return {"ok": True, "operation_id": gs.operation_id, "ghost_task": gs.ghost_task,
             "substitutions": [s.to_dict() for s in gs.substitutions]}
+
+
+@server.tool()
+def screen(text: str, real_text: str = "", config_path: str = "privacy.yaml",
+           mapping_path: str = "workspace/private/mapping.json",
+           candidates_path: str = "workspace/private/candidates.jsonl",
+           decisions_path: str = "",
+           audit_path: str = "workspace/private/audit.jsonl") -> dict:
+    """Score outbound text for sensitive entities `privacy.yaml` never named — the
+    second gate after compile_spec's closed-world substitution. Returns the scored
+    findings and whether they block; it never rewrites anything.
+
+    `real_text` is accepted for symmetry with the client agent's LLM adjudicator but
+    is not scanned here: this tool is the deterministic layer only."""
+    from ghostc.screen import screen_text
+
+    res = screen_text(text, real_text=real_text or None, config_path=config_path,
+                      mapping_path=mapping_path, candidates_path=candidates_path,
+                      decisions_path=decisions_path or None, audit_path=audit_path)
+    return {"ok": True, "operation_id": res.operation_id, "blocked": res.blocked,
+            "reason": res.reason, "metrics": res.metrics(),
+            "findings": [c.to_dict() for c in res.findings]}
 
 
 @server.tool()

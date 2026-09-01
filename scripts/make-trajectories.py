@@ -35,7 +35,7 @@ _NOISE = {
 }
 
 # component -> which agent's trajectory the event belongs to.
-_CLIENT = {"client_agent", "spec_compiler", "reverse-compiler", "orchestrator",
+_CLIENT = {"client_agent", "spec_compiler", "screen", "reverse-compiler", "orchestrator",
            "compiler", "verifier"}
 _CONSULTANCY = {"consultancy_agent"}
 
@@ -88,6 +88,20 @@ def _fmt_details(event: str, d: dict, subject: dict | None = None) -> str:
         subs = d.get("substitutions", [])
         parts = [f"{s['entity_id']}→`{s['ghost']}` ×{s['count']}" for s in subs]
         return f"{len(subs)} entities substituted: " + ", ".join(parts)
+    if event == "screen.scanned":
+        adj = d.get("adjudicator", "off")
+        return (f"{d.get('source')} · {d.get('flagged', 0)} flagged / {d.get('scored', 0)} "
+                f"scored · top={d.get('top_score')} · adjudicator={adj}"
+                + (f" ({d.get('adjudicator_dropped')} unanchored claim(s) dropped)"
+                   if d.get("adjudicator_dropped") else "")
+                + (f" · {d.get('suppressed')} suppressed by review decisions"
+                   if d.get("suppressed") else ""))
+    if event == "screen.blocked":
+        fs = d.get("findings", [])
+        worst = max(fs, key=lambda f: f.get("score", 0)) if fs else {}
+        return (f"**{len(fs)} unscreened finding(s)** in the outbound {d.get('source')} — "
+                f"strongest `{worst.get('evidence')}` @ {worst.get('score')} "
+                f"({worst.get('kind')}/{worst.get('level')}). Surfaces are hashed.")
     if event == "agent.consultancy_developed":
         return (f"branch `{d.get('branch')}` · commit `{str(d.get('commit'))[:8]}` · "
                 f"+{d.get('commits_added')} commit(s) by {', '.join(d.get('authors', []))}")
@@ -218,21 +232,28 @@ def client_trajectory(events: list[dict], runs: list[dict], audit: str, metrics:
         "a free-running prompt loop: the graph decides what happens next, so a fail-closed "
         "gate cannot be talked out of by a model. |",
         "| **Instructions** | The graph topology itself (`client_agent/graph.py::_wire`, "
-        "diagram in `client_agent/graph.md`). One LLM call inside it — the PR-consistency "
-        "verdict — is prompted in `client_agent/graph.py`. |",
-        "| **Tools** | `ghostc.spec.compile_spec`, `ghostc.patch.reverse_patch`, "
-        "`ghostc.verify`, `bridge.forge` (git), `bridge.llm` (consistency verdict). |",
+        "diagram in `client_agent/graph.md`). Two LLM calls inside it — the outbound-screen "
+        "adjudicator (`client_agent/screen_llm.py`) and the PR-consistency verdict "
+        "(`client_agent/graph.py`) — and neither of them decides anything on its own. |",
+        "| **Tools** | `ghostc.spec.compile_spec`, `ghostc.screen.screen_text`, "
+        "`ghostc.patch.reverse_patch`, `ghostc.verify`, `bridge.forge` (git), `bridge.llm` "
+        "(screen adjudicator + consistency verdict). |",
         "| **Boundary rule** | `handoff` is the only node that writes to the ghost side. |",
         "",
         "## Node sequence",
         "",
         "```",
-        "plan → compile_spec → handoff → await_ghost_pr → reverse_patch → verify",
-        "     → consistency → open_real_pr → emit_metrics",
+        "plan → compile_spec → screen → handoff → await_ghost_pr → reverse_patch",
+        "     → verify → consistency → open_real_pr → emit_metrics",
         "```",
         "",
         "Dotted edges in `client_agent/graph.md` are fail-closed short-circuits: on any "
         "`Rejection`, the run jumps straight to `emit_metrics` and **no PR is opened**.",
+        "",
+        "`compile_spec` and `screen` are the two gates in front of the wire, and they fail "
+        "for opposite reasons: `compile_spec` blocks when a **known** real spelling survives "
+        "its own substitution, `screen` blocks when something **nobody ever configured** is "
+        "still there. The first is closed-world and cannot see the second class at all.",
         "",
         "## What actually happened",
         "",
@@ -248,7 +269,7 @@ def client_trajectory(events: list[dict], runs: list[dict], audit: str, metrics:
         "node raises and the run ends here — the task text never crosses half-sanitized.",
         "2. **`agent.spec_handoff` is the boundary crossing.** Everything after it that "
         "touches ghost data is the other agent's work (trajectory 2).",
-        "3. **`patch.entity_resolved` carries a `lossy` flag.** A code token round-trips "
+        "4. **`patch.entity_resolved` carries a `lossy` flag.** A code token round-trips "
         "exactly; a multi-word display name may not, so it is flagged rather than guessed — "
         "the reverse compiler never invents a real value it is not sure of.",
     ]
@@ -275,6 +296,45 @@ def client_trajectory(events: list[dict], runs: list[dict], audit: str, metrics:
             "The operator re-ran the command against the current base; the second attempt "
             "resolved the same three entities and opened the branch. **Both attempts are in "
             "the log** — the rejected one is evidence the gate is real, not decorative.",
+        ]
+
+    screened = [e for e in ev if e.get("event") == "screen.blocked"]
+    if screened:
+        sb = screened[-1]
+        d = sb.get("details", {})
+        fs = d.get("findings", [])
+        by_layer: dict[str, int] = {}
+        for f in fs:
+            by_layer[f.get("evidence", "?")] = by_layer.get(f.get("evidence", "?"), 0) + 1
+        out += [
+            "",
+            "## The screen block — a class the compiler cannot see",
+            "",
+            "A later run stopped for a different reason: not a *known* real value "
+            "surviving substitution, but "
+            f"**{len(fs)} value(s) nobody had ever configured**. `compile_spec` had nothing "
+            "to say about them — it substitutes what `privacy.yaml` and the mapping name, "
+            "and its own leak scan searches for those same spellings — so they reached "
+            "`screen` untouched, one node before the only node that writes ghost-side.",
+            "",
+            "| finding (hashed) | score | kind / level | evidence |",
+            "|---|---|---|---|",
+        ]
+        out += [f"| `{f.get('real_sha256', '')[:12]}…` | {f.get('score')} | "
+                f"{f.get('kind')}/{f.get('level')} | {f.get('evidence')} |" for f in fs]
+        layers = ", ".join(f"{n}× {lbl}" for lbl, n in sorted(by_layer.items()))
+        out += [
+            "",
+            f"By layer: {layers}. The `llm`-only rows are the ones that justify the "
+            "adjudicator existing at all — the deterministic detector proposes an "
+            "unconfigured entity only from a structural *anchor*, which is exactly what "
+            "keeps OSS package names out of `discover`'s proposals and exactly what blinds "
+            "it to a partner's name in an English sentence.",
+            "",
+            "Note what is **not** in this table: the surfaces themselves. The audit log is "
+            "hash-only by construction, so the record of a privacy failure is not itself a "
+            "privacy failure. The operator reads the cleartext from the run's own stdout, "
+            "inside the boundary.",
         ]
 
     if gates:
@@ -489,20 +549,32 @@ def index(audit: str, metrics: str, wrote: list[str]) -> str:
         "",
         "| # | Agent | Kind | Trajectory |",
         "|---|---|---|---|",
-        "| 1 | client orchestrator (`client_agent`) | LangGraph state machine + one LLM "
-        "verdict | [`01-client-orchestrator.md`](01-client-orchestrator.md) |",
+        "| 1 | client orchestrator (`client_agent`) | LangGraph state machine + two "
+        "advisory LLM calls (screen adjudicator, consistency verdict) | "
+        "[`01-client-orchestrator.md`](01-client-orchestrator.md) |",
         "| 2 | consultancy coding agent (`consultancy_agent`) | Claude prompt loop over a "
         "tool surface | [`02-consultancy-coding-agent.md`](02-consultancy-coding-agent.md) |",
         "",
         "## Why there are only two",
         "",
-        "`ghostc discover`, the privacy compiler, the verifier and the reverse-patch "
-        "compiler are **deterministic programs, not agents** — they are the tools the two "
-        "agents call, and they are covered by the audit log and the test suite rather than "
-        "by a trajectory. Presenting them as agents would overstate what they are.",
+        "`ghostc discover`, the privacy compiler, the verifier, the reverse-patch compiler "
+        "and the outbound screen are **deterministic programs, not agents** — they are the "
+        "tools the two agents call, and they are covered by the audit log and the test "
+        "suite rather than by a trajectory. Presenting them as agents would overstate what "
+        "they are.",
         "",
-        "## The two things worth looking at",
+        "The screen is the closest call, because it *does* make an LLM call "
+        "(`client_agent/screen_llm.py`). It stays a tool rather than a third agent because "
+        "the model has no autonomy in it: one prompt, no loop, no tools of its own, and its "
+        "output is re-anchored and score-capped before a deterministic rule decides. It "
+        "appears in trajectory 1 as two audit events, which is exactly its weight.",
         "",
+        "## The things worth looking at",
+        "",
+        "- **Two fail-closed blocks, for two different reasons** — trajectory 1. `screen` "
+        "stopped a run over five values *nobody had ever configured* (the class the "
+        "closed-world compiler cannot see), and the recorded findings are hashes, not "
+        "surfaces.",
         "- **A genuine fail-closed block and its retry** — trajectory 1. The reverse-compiled "
         "diff did not apply to a real repo that had moved on, so the run stopped and wrote a "
         "`rejected` metrics row instead of forcing the patch. Both attempts are in the log.",

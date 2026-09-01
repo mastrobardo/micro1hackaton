@@ -76,10 +76,18 @@ Measured by `ghostc eval` on a fixed fixture; `ghostc discover` separately re-fi
 configured entities from code alone and proposes 2 unconfigured ones with no OSS-library false
 positives.
 
+That number covers the entities the config **names**. The one it cannot cover is the entity
+nobody configured — a partner typed fresh into a ticket, invisible to a closed-world redactor
+*and* to a leak scan that searches for known spellings. `ghostc screen` is the second gate for
+that class: it scores the compiler's own output (structural shapes + standing `discover`
+proposals + a client-side LLM adjudicator that may accuse but never decide) and blocks the run
+before anything crosses. `specs/002-onboard-halcyon-cargo.md` is a worked example that exists
+to be blocked.
+
 ## Status
 
-The deterministic pipeline (`discover` / `compile` / `verify` / `baseline` / `eval` /
-`apply-patch`) is complete and tested. The agent workflow runs end to end: a real ticket
+The deterministic pipeline (`discover` / `compile` / `screen` / `verify` / `baseline` /
+`eval` / `apply-patch`) is complete and tested. The agent workflow runs end to end: a real ticket
 becomes a sanitized ghost task, a real Claude agent implements it on the ghost repo, and the
 work is reverse-compiled onto a real-repo branch — verified leak-clean with tests green on
 both sides. This submission is a **reproducibility-first POC**: local git repos stand in for a

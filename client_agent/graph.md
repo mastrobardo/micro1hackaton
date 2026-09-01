@@ -14,6 +14,7 @@ graph TD;
 	__start__([<p>__start__</p>]):::first
 	plan(plan)
 	compile_spec(compile_spec)
+	screen(screen)
 	handoff(handoff)
 	await_ghost_pr(await_ghost_pr)
 	reverse_patch(reverse_patch)
@@ -25,13 +26,15 @@ graph TD;
 	__start__ --> plan;
 	await_ghost_pr --> reverse_patch;
 	compile_spec -.-> emit_metrics;
-	compile_spec -.-> handoff;
+	compile_spec -.-> screen;
 	consistency --> open_real_pr;
 	handoff --> await_ghost_pr;
 	open_real_pr --> emit_metrics;
 	plan --> compile_spec;
 	reverse_patch -.-> emit_metrics;
 	reverse_patch -.-> verify;
+	screen -.-> emit_metrics;
+	screen -.-> handoff;
 	verify -.-> consistency;
 	verify -.-> emit_metrics;
 	emit_metrics --> __end__;
@@ -57,6 +60,7 @@ graph TD;
 	__start__([<p>__start__</p>]):::first
 	plan(plan)
 	compile_spec(compile_spec)
+	screen(screen)
 	handoff(handoff)
 	await_consultancy(await_consultancy)
 	emit_metrics(emit_metrics)
@@ -64,9 +68,11 @@ graph TD;
 	__start__ --> plan;
 	await_consultancy --> emit_metrics;
 	compile_spec -.-> emit_metrics;
-	compile_spec -.-> handoff;
+	compile_spec -.-> screen;
 	handoff --> await_consultancy;
 	plan --> compile_spec;
+	screen -.-> emit_metrics;
+	screen -.-> handoff;
 	emit_metrics --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
@@ -80,6 +86,7 @@ graph TD;
 |---|---|---|
 | `plan` | start the run, record backend + start time | `agent.task_started` |
 | `compile_spec` | `ghostc.spec.compile_spec` → sanitized `TASK.md`. **Fail-closed gate.** | `spec.compiled` / `spec.rejected` |
+| `screen` | `ghostc.screen.screen_text` over the *compiled* task: structural shapes + standing `discover` proposals + the client-side LLM adjudicator (`client_agent/screen_llm.py`), scored by the same noisy-OR as `discover`. Catches the entities `privacy.yaml` never named — the ones `compile_spec` is blind to by construction. **Fail-closed gate** (`--screen-mode block`, the default). | `screen.scanned` / `screen.blocked` |
 | `handoff` | *(reduced)* in `../ghostc-demo/ghost`: branch `ghostc/task/<id>`, commit the sanitized `TASK.md` as `ghostc-client`, `git push -f origin` — which fires the bare origin's `post-receive` hook. *(full)* same via `LocalBareForge`. | `agent.spec_handoff` |
 | `await_consultancy` | *(reduced)* `git fetch origin`; confirm the hook's consultancy run pushed a commit on top of the `TASK.md` commit; `git branch -f` so it is checkoutable; record authors | `agent.consultancy_developed` |
 | `await_ghost_pr` | *(full)* consultancy implements + opens a **ghost PR** (`consultancy_agent.sim`) | `agent.ghost_pr_opened` |
@@ -89,4 +96,8 @@ graph TD;
 | `open_real_pr` | *(full)* apply the real diff, open a **real-repo PR**, flag for human review | `agent.real_pr_opened`, `approval.requested` |
 | `emit_metrics` | assemble the metrics row; also the sink for every fail-closed short-circuit | `agent.metrics`, `agent.task_completed` |
 
-Dotted edges are the fail-closed short-circuits: on any `Rejection` / block the run skips straight to `emit_metrics` and **no PR is opened**. `handoff` is the only node that writes to the ghost side — the privacy boundary is on that wire.
+Dotted edges are the fail-closed short-circuits: on any `Rejection` / block the run skips straight to `emit_metrics` and **no PR is opened**. `handoff` is the only node that writes to the ghost side — the privacy boundary is on that wire, and `compile_spec` → `screen` are the two gates in front of it.
+
+### Why two gates
+
+`compile_spec` is **closed-world**: it substitutes the entities `privacy.yaml` and `mapping.json` name, and its leak scan looks for those same real spellings. A name nobody ever configured is invisible to both and crosses untouched. `screen` is the open-world half — it scores the compiler's *output*, so every finding is by construction something the closed world did not cover. Its deterministic layer (shapes, standing `discover` proposals) is precision-first and offline; the LLM adjudicator adds recall on prose, may only **accuse**, and has every claim anchored back into the outbound text before it can score. Nothing in `screen` transforms anything — it queues and it blocks.

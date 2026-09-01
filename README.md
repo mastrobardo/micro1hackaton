@@ -72,6 +72,7 @@ python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 ghostc discover --repo workspace/real --config privacy.yaml   # score + propose sensitive entities
 ghostc compile  --repo workspace/real --config privacy.yaml --out workspace/ghost
 ghostc verify   --ghost workspace/ghost --mapping workspace/private/mapping.json
+ghostc screen   --text <ghost TASK.md> --candidates workspace/private/candidates.jsonl  # gate the OUTBOUND text
 ghostc apply-patch --ghost-diff <ghost-pr.diff> --mapping workspace/private/mapping.json --real workspace/real --apply
 ghostc baseline --repo workspace/real --config privacy.yaml   # fair comparator (keyword redaction)
 ghostc eval     --real workspace/real --config privacy.yaml   # -> workspace/eval-report.{md,csv}
@@ -154,6 +155,20 @@ key is in LangSmith's **EU** tenant, also set
 objects without running anything. `workflow_dispatch` can pick `consultancy_backend: claude`.
 Setup: `GETTING_STARTED.md` §7.
 
+**Outbound screen.** The compiler is **closed-world** — it substitutes the entities
+`privacy.yaml` and the mapping name, and its fail-closed leak scan searches for those same
+real spellings, so a partner nobody ever configured is invisible to the redactor *and* to its
+own gate. `ghostc screen` (graph node `screen`, between `compile_spec` and `handoff`) is the
+open-world second gate: it scores the compiler's **output** — structural shapes, standing
+`discover` proposals, and a client-side LLM adjudicator that is shown the real ticket and the
+sanitized one and asked which spellings still refer to something real. The model may
+**accuse, never decide**: every surface it names is re-anchored in the outbound text before it
+can score, its signal is capped below the auto threshold, and no screen signal is a *hard*
+signal — so a finding is only ever `review` or `ignore`, never a silent transform. Blocks by
+default; a reviewer `ignore` in `decisions.jsonl` clears a false positive for good. Worked
+example: `specs/002-onboard-halcyon-cargo.md` (a ticket that exists to be blocked). Details:
+`cli.md` §12.
+
 **Human review board.** `ghostc-review` (Streamlit, `[review]` extra) — a reviewer accepts /
 ignores / escalates `discover` proposals and clears `restricted` entities into an append-only
 `decisions.jsonl`. `ghostc compile --decisions <path>` / `discover --decisions` consume that
@@ -163,7 +178,8 @@ example: `fixtures/decisions.example.jsonl`. Details: `GETTING_STARTED.md` §8.
 
 ### Poking the MCP server
 
-`ghostc-mcp` exposes `compile_spec` / `discover` / `verify` / `apply_patch` as MCP tools.
+`ghostc-mcp` exposes `compile_spec` / `screen` / `discover` / `verify` / `apply_patch` as MCP
+tools.
 Test it interactively with the MCP Inspector (needs Node; first run downloads it):
 
 ```bash
