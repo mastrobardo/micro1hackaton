@@ -1,0 +1,377 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ghostc \u2014 Privacy Boundary Architecture",
+    "output": "docs/diagrams/ghostc-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "closed-world",
+        "label": "Closed world: configured entities",
+        "focus": [
+          "real_repo",
+          "discover",
+          "mapping",
+          "compiler"
+        ],
+        "note": "Discovery proposes, a human approves, the compiler substitutes only what the mapping names."
+      },
+      {
+        "id": "the-wire",
+        "label": "The wire: what actually crosses",
+        "focus": [
+          "screen",
+          "forge",
+          "ghost_ws",
+          "consultancy"
+        ],
+        "note": "Only the compiled ghost repo and ghost spec leave the boundary, and only after the screen passes."
+      },
+      {
+        "id": "return-path",
+        "label": "Return path: ghost diff to real branch",
+        "focus": [
+          "consultancy",
+          "forge",
+          "reverse",
+          "verify",
+          "real_repo"
+        ],
+        "note": "The ghost diff is decoded against the mapping, verified, then landed as a real branch."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "audit",
+      "type": "cloud",
+      "label": "Audit Log",
+      "sublabel": "audit.jsonl \u00b7 real_sha256 only",
+      "tag": "ghostc/",
+      "pos": [
+        60,
+        40
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "orchestrator",
+      "type": "backend",
+      "label": "Client Agent",
+      "sublabel": "LangGraph \u00b7 ghostc-agent",
+      "tag": "client_agent/",
+      "pos": [
+        300,
+        40
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "real_repo",
+      "type": "database",
+      "label": "Real Repo",
+      "sublabel": "client code + specs/*.md",
+      "tag": "company",
+      "pos": [
+        60,
+        180
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "compiler",
+      "type": "backend",
+      "label": "Privacy Compiler",
+      "sublabel": "ghostc compile \u00b7 tree-sitter",
+      "tag": "ghostc/",
+      "pos": [
+        300,
+        180
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "screen",
+      "type": "security",
+      "label": "Outbound Screen",
+      "sublabel": "ghostc screen \u00b7 fail-closed",
+      "tag": "ghostc/ + client_agent/",
+      "pos": [
+        540,
+        180
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "discover",
+      "type": "backend",
+      "label": "Entity Discovery",
+      "sublabel": "ghostc discover \u00b7 noisy-OR",
+      "tag": "ghostc/",
+      "pos": [
+        300,
+        320
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "mapping",
+      "type": "database",
+      "label": "Mapping Store",
+      "sublabel": "real \u2192 ghost \u00b7 frozen entries",
+      "tag": "ghostc/",
+      "pos": [
+        540,
+        320
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "forge",
+      "type": "messagebus",
+      "label": "Ghost Remote",
+      "sublabel": "bridge.forge \u00b7 bare git",
+      "tag": "bridge/",
+      "pos": [
+        800,
+        320
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "verify",
+      "type": "security",
+      "label": "Verification",
+      "sublabel": "ghostc verify \u00b7 PASS / BLOCK",
+      "tag": "ghostc/",
+      "pos": [
+        60,
+        460
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "reverse",
+      "type": "backend",
+      "label": "Reverse Patch Compiler",
+      "sublabel": "ghostc apply-patch",
+      "tag": "ghostc/",
+      "pos": [
+        300,
+        460
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "ghost_ws",
+      "type": "cloud",
+      "label": "Ghost Workspace",
+      "sublabel": "ghost repo + ghost-spec.md",
+      "tag": "ghost only",
+      "pos": [
+        1050,
+        180
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "consultancy",
+      "type": "external",
+      "label": "Consultancy Agent",
+      "sublabel": "untrusted coding agent",
+      "tag": "consultancy_agent/",
+      "pos": [
+        1050,
+        460
+      ],
+      "size": [
+        160,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "COMPANY TRUST BOUNDARY",
+      "wraps": [
+        "audit",
+        "orchestrator",
+        "real_repo",
+        "compiler",
+        "screen",
+        "discover",
+        "mapping",
+        "verify",
+        "reverse"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "region",
+      "label": "EXTERNAL \u2014 untrusted",
+      "wraps": [
+        "ghost_ws",
+        "consultancy"
+      ],
+      "pad": 22
+    }
+  ],
+  "connections": [
+    {
+      "from": "real_repo",
+      "to": "compiler",
+      "label": "source + spec",
+      "variant": "emphasis"
+    },
+    {
+      "from": "real_repo",
+      "to": "discover",
+      "label": "scan for entities",
+      "variant": "dashed"
+    },
+    {
+      "from": "discover",
+      "to": "mapping",
+      "label": "proposed aliases",
+      "labelDy": 56
+    },
+    {
+      "from": "mapping",
+      "to": "compiler",
+      "label": "stable aliases",
+      "fromSide": "top"
+    },
+    {
+      "from": "compiler",
+      "to": "screen",
+      "label": "compiled ghost",
+      "variant": "emphasis"
+    },
+    {
+      "from": "screen",
+      "to": "forge",
+      "label": "push only when clean",
+      "variant": "security"
+    },
+    {
+      "from": "forge",
+      "to": "ghost_ws",
+      "label": "refs/ghostc/task"
+    },
+    {
+      "from": "ghost_ws",
+      "to": "consultancy",
+      "label": "clone + ghost spec",
+      "labelDy": 80
+    },
+    {
+      "from": "consultancy",
+      "to": "forge",
+      "label": "ghost branch",
+      "variant": "dashed"
+    },
+    {
+      "from": "forge",
+      "to": "reverse",
+      "label": "ghost diff",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mapping",
+      "to": "reverse",
+      "label": "decode table",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "labelDy": 45
+    },
+    {
+      "from": "reverse",
+      "to": "verify",
+      "label": "decoded patch"
+    },
+    {
+      "from": "verify",
+      "to": "real_repo",
+      "label": "ghostc/real branch",
+      "variant": "emphasis"
+    },
+    {
+      "from": "orchestrator",
+      "to": "compiler",
+      "label": "drives the graph",
+      "variant": "dashed",
+      "labelDy": 78
+    },
+    {
+      "from": "orchestrator",
+      "to": "audit",
+      "label": "one event per step",
+      "variant": "dashed",
+      "labelDy": 56
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Two gates in front of the wire",
+      "items": [
+        "compile_spec fails closed on a residual configured spelling",
+        "screen scores the compiled output and fails closed on an unknown one",
+        "The LLM adjudicator may accuse only, never auto-alias"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "The boundary is an import rule",
+      "items": [
+        "consultancy_agent may import bridge only; tests/test_boundary.py enforces it",
+        "The handoff is a git push to a ghost remote, not a function call",
+        "The external agent sees workspace/ghost/ and ghost-spec.md, nothing else"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Evidence, not assertion",
+      "items": [
+        "Every step appends to audit.jsonl carrying real_sha256, never cleartext",
+        "On the fixture: baseline leaves 28 residual occurrences, compile leaves 0",
+        "Reverse patch rejects unmapped aliases and mapping-version mismatch"
+      ]
+    }
+  ]
+}
