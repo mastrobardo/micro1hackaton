@@ -6,6 +6,39 @@
 > boundary** — reducing the surface for **unintentional** disclosure and proving it with a fair
 > baseline and an evidence-linked changelog.
 
+## The system at a glance
+
+Two views of the same pipeline. Both are generated from typed JSON in `docs/diagrams/`, and
+both open as **interactive HTML** — click a node to trace its authored upstream/downstream
+reach, or play the numbered guided views.
+
+**Architecture** — where the trust boundary actually falls. Each node is tagged with the
+package that owns it, so the `ghostc/` · `bridge/` · `client_agent/` · `consultancy_agent/`
+import rule (enforced by `tests/test_boundary.py`) reads straight off the map. The **Ghost
+Remote** sits outside both hulls: it is the wire.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/ghostc-architecture.dark.png">
+  <img alt="ghostc architecture: the company trust boundary, the bridge.forge ghost remote as the wire, and the external consultancy side" src="docs/diagrams/ghostc-architecture.light.png">
+</picture>
+
+*[Open the interactive version](docs/diagrams/ghostc-architecture.html)* · [vector](docs/diagrams/ghostc-architecture.svg)
+
+**Workflow** — the `ghostc-agent run-task` round trip, lane by lane. The two gates in front of
+the wire (`compile_spec`, then `screen`) each fail closed into the exception lane; `handoff` is
+the only node that ever writes ghost-side.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/ghostc-workflow.dark.png">
+  <img alt="ghostc round-trip pipeline: plan, compile_spec, screen, handoff, the external coding agent, then reverse_patch, verify, consistency, open_real_pr, emit_metrics" src="docs/diagrams/ghostc-workflow.light.png">
+</picture>
+
+*[Open the interactive version](docs/diagrams/ghostc-workflow.html)* · [vector](docs/diagrams/ghostc-workflow.svg)
+
+> The LangGraph topology itself is generated from the code — see `client_agent/graph.md`
+> (`ghostc-agent print-graph`). These diagrams are the presentation layer over it; the
+> authoritative component contracts are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## Who has this problem
 
 Consultancies and product teams working on **client-owned code**. They want to use external

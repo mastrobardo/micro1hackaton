@@ -1,0 +1,327 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "ghostc \u2014 Round-trip Task Pipeline",
+    "output": "docs/diagrams/ghostc-workflow.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "two-gates",
+        "label": "Two gates before the wire",
+        "focus": [
+          "plan",
+          "compile_spec",
+          "screen",
+          "handoff",
+          "halt"
+        ],
+        "note": "compile_spec closes the known world, screen scores the unknown one; only then may handoff write ghost-side."
+      },
+      {
+        "id": "crossing",
+        "label": "Crossing the boundary",
+        "focus": [
+          "handoff",
+          "ghost_dev",
+          "await_pr"
+        ],
+        "note": "The handoff is a git push to a ghost remote, so the two agents stay separate processes."
+      },
+      {
+        "id": "return",
+        "label": "Decoding the ghost diff",
+        "focus": [
+          "await_pr",
+          "reverse_patch",
+          "verify",
+          "consistency",
+          "open_real_pr"
+        ],
+        "note": "The ghost diff is decoded against the mapping, leak-scanned, then judged before a human merges."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "outbound",
+      "label": "Company boundary \u2014 outbound (client_agent)"
+    },
+    {
+      "id": "blocked",
+      "label": "Fail closed \u2014 nothing crosses",
+      "variant": "exception"
+    },
+    {
+      "id": "external",
+      "label": "External \u2014 untrusted (consultancy_agent)"
+    },
+    {
+      "id": "inbound",
+      "label": "Company boundary \u2014 return (client_agent)"
+    }
+  ],
+  "mainPath": [
+    "plan",
+    "compile_spec",
+    "screen",
+    "handoff",
+    "ghost_dev"
+  ],
+  "semanticChecks": {
+    "allowedRoots": [
+      "plan"
+    ],
+    "allowedTerminals": [
+      "emit_metrics",
+      "halt"
+    ],
+    "requiredEdges": [
+      {
+        "from": "compile_spec",
+        "to": "screen"
+      },
+      {
+        "from": "screen",
+        "to": "handoff"
+      }
+    ],
+    "requiredPaths": [
+      {
+        "from": "plan",
+        "to": "emit_metrics"
+      }
+    ]
+  },
+  "nodes": [
+    {
+      "id": "plan",
+      "lane": "outbound",
+      "col": 0,
+      "type": "backend",
+      "label": "plan",
+      "sublabel": "read specs/*.md",
+      "width": 128
+    },
+    {
+      "id": "compile_spec",
+      "lane": "outbound",
+      "col": 1,
+      "type": "security",
+      "label": "compile_spec",
+      "sublabel": "configured entities",
+      "tag": "gate 1",
+      "width": 128
+    },
+    {
+      "id": "screen",
+      "lane": "outbound",
+      "col": 2,
+      "type": "security",
+      "label": "screen",
+      "sublabel": "unconfigured entities",
+      "tag": "gate 2",
+      "width": 128
+    },
+    {
+      "id": "handoff",
+      "lane": "outbound",
+      "col": 3,
+      "type": "messagebus",
+      "label": "handoff",
+      "sublabel": "push to ghost remote",
+      "width": 128
+    },
+    {
+      "id": "halt",
+      "lane": "blocked",
+      "col": 3,
+      "type": "security",
+      "label": "run blocked",
+      "sublabel": "no ghost-side write",
+      "width": 128
+    },
+    {
+      "id": "ghost_dev",
+      "lane": "external",
+      "col": 4,
+      "type": "external",
+      "label": "coding agent",
+      "sublabel": "develops ghost branch",
+      "width": 128
+    },
+    {
+      "id": "await_pr",
+      "lane": "inbound",
+      "col": 5,
+      "type": "backend",
+      "label": "await_ghost_pr",
+      "sublabel": "fetch ghost branch",
+      "width": 128
+    },
+    {
+      "id": "reverse_patch",
+      "lane": "inbound",
+      "col": 4,
+      "type": "backend",
+      "label": "reverse_patch",
+      "sublabel": "decode via mapping",
+      "width": 128
+    },
+    {
+      "id": "verify",
+      "lane": "inbound",
+      "col": 3,
+      "type": "security",
+      "label": "verify",
+      "sublabel": "anchored leak scan",
+      "width": 128
+    },
+    {
+      "id": "consistency",
+      "lane": "inbound",
+      "col": 2,
+      "type": "cloud",
+      "label": "consistency",
+      "sublabel": "LLM verdict + flags",
+      "width": 128
+    },
+    {
+      "id": "open_real_pr",
+      "lane": "inbound",
+      "col": 1,
+      "type": "frontend",
+      "label": "open_real_pr",
+      "sublabel": "real-repo branch + PR",
+      "width": 128
+    },
+    {
+      "id": "emit_metrics",
+      "lane": "inbound",
+      "col": 0,
+      "type": "database",
+      "label": "emit_metrics",
+      "sublabel": "audit.jsonl + metrics",
+      "width": 128
+    }
+  ],
+  "edges": [
+    {
+      "from": "plan",
+      "to": "compile_spec",
+      "label": "task text",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "from": "compile_spec",
+      "to": "screen",
+      "label": "compiled ghost spec",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "from": "screen",
+      "to": "handoff",
+      "label": "clean",
+      "variant": "emphasis",
+      "role": "main",
+      "route": "straight"
+    },
+    {
+      "from": "handoff",
+      "to": "ghost_dev",
+      "label": "ghost repo + spec",
+      "variant": "security",
+      "role": "main"
+    },
+    {
+      "from": "compile_spec",
+      "to": "halt",
+      "label": "residual known spelling",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "screen",
+      "to": "halt",
+      "label": "unknown entity scored",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "from": "ghost_dev",
+      "to": "await_pr",
+      "label": "ghost branch",
+      "role": "async"
+    },
+    {
+      "from": "await_pr",
+      "to": "reverse_patch",
+      "label": "ghost diff",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "from": "reverse_patch",
+      "to": "verify",
+      "label": "decoded patch",
+      "role": "return"
+    },
+    {
+      "from": "verify",
+      "to": "consistency",
+      "label": "PASS",
+      "role": "return"
+    },
+    {
+      "from": "consistency",
+      "to": "open_real_pr",
+      "label": "verdict + flags",
+      "role": "return"
+    },
+    {
+      "from": "open_real_pr",
+      "to": "emit_metrics",
+      "label": "run complete",
+      "role": "return"
+    },
+    {
+      "from": "verify",
+      "to": "emit_metrics",
+      "label": "BLOCK \u2014 no real PR",
+      "variant": "security",
+      "role": "error",
+      "route": "bottom-channel"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "Fail closed, twice",
+      "items": [
+        "compile_spec blocks on a residual configured spelling",
+        "screen blocks on an entity nobody configured",
+        "handoff is the only node that writes ghost-side"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "The wire is a git push",
+      "items": [
+        "handoff pushes to a bare ghost remote via bridge.forge",
+        "The agent gets the ghost repo and spec, no mapping",
+        "Production resumes this on a forge webhook"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Nothing merges unreviewed",
+      "items": [
+        "reverse_patch rejects unmapped alias-shaped tokens",
+        "verify re-scans the decoded patch and fails closed",
+        "consistency feeds a human gate; it never merges"
+      ]
+    }
+  ]
+}
