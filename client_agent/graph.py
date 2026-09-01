@@ -5,21 +5,30 @@ Runs inside the company trust boundary. Two shapes, selected by ``run_task``'s
 
 * **full** (``run-task``) — one task in, one real-repo PR out::
 
-    plan → compile_spec → [leak gate] → handoff (ghost branch + TASK.md)
+    plan → compile_spec → [leak gate] → screen → [unknown-entity gate]
+         → handoff (ghost branch + TASK.md)
          → await_ghost_pr → reverse_patch → verify → consistency
          → open_real_pr → emit_metrics
 
 * **reduced** (``client-agent start``, ``stop_after="develop"``) — stop once the
   consultancy has developed the ghost feature branch::
 
-    plan → compile_spec → [leak gate] → handoff (push triggers a post-receive
-         hook on the ghost bare repo that runs the consultancy against the branch)
+    plan → compile_spec → [leak gate] → screen → [unknown-entity gate]
+         → handoff (push triggers a post-receive hook on the ghost bare repo that
+         runs the consultancy against the branch)
          → await_consultancy → emit_metrics       # no ghost PR, no real PR
 
-``compile_spec`` and ``reverse_patch`` are the fail-closed gates: on a
-:class:`ghostc.spec.Rejection` / :class:`ghostc.patch.Rejection` the run
-short-circuits to ``emit_metrics`` (which records the failure) and no real PR is
-opened. Every node emits an audit event; the metrics row is derived from the log.
+``compile_spec``, ``screen`` and ``reverse_patch`` are the fail-closed gates: on a
+:class:`ghostc.spec.Rejection` / a blocking :class:`ghostc.screen.ScreenResult` /
+a :class:`ghostc.patch.Rejection` the run short-circuits to ``emit_metrics``
+(which records the failure) and no real PR is opened. Every node emits an audit
+event; the metrics row is derived from the log.
+
+``compile_spec`` can only redact the entities ``privacy.yaml`` + ``mapping.json``
+name; ``screen`` is the second gate that scores the compiled output for the ones
+they never heard of (:mod:`ghostc.screen`, plus the client-side LLM adjudicator in
+:mod:`client_agent.screen_llm`). It sits *between* the compiler and the wire, so
+by the time it runs everything the closed world covered is already gone.
 A rendered diagram lives at ``client_agent/graph.md`` (regenerate with
 ``python -m client_agent print-graph``).
 
@@ -44,12 +53,14 @@ from bridge.llm import configure_langsmith, get_llm
 from bridge.metrics import metrics_path, record_run
 from bridge.trace import traceable
 from client_agent import localgit
+from client_agent.screen_llm import build_adjudicator
 from client_agent.state import TaskState, new_state
 from consultancy_agent.sim import run_consultancy
 from ghostc.audit import AuditLog, new_operation_id
 from ghostc.mapping import MappingStore
 from ghostc.patch import Rejection as PatchRejection
 from ghostc.patch import reverse_patch
+from ghostc.screen import screen_text, write_findings
 from ghostc.spec import Rejection as SpecRejection
 from ghostc.spec import compile_spec
 
@@ -103,6 +114,8 @@ def _wire(g: StateGraph, *, reduced: bool = False) -> None:
     g.add_edge(START, "plan")
     g.add_edge("plan", "compile_spec")
     g.add_conditional_edges("compile_spec", _after_spec,
+                            {"screen": "screen", "emit_metrics": "emit_metrics"})
+    g.add_conditional_edges("screen", _after_screen,
                             {"handoff": "handoff", "emit_metrics": "emit_metrics"})
     if reduced:
         g.add_edge("handoff", "await_consultancy")
@@ -121,6 +134,10 @@ def _wire(g: StateGraph, *, reduced: bool = False) -> None:
 
 
 def _after_spec(state: TaskState) -> str:
+    return "emit_metrics" if state.get("rejected") else "screen"
+
+
+def _after_screen(state: TaskState) -> str:
     return "emit_metrics" if state.get("rejected") else "handoff"
 
 
@@ -136,7 +153,11 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
                        mapping_path: str, audit_path: str, real_repo: str,
                        ghost_tree: str, consultancy_repo: str, scratch: Path,
                        backend: str, consultancy_fn: ConsultancyFn,
-                       reduced: bool = False, metrics_file: str | None = None):
+                       reduced: bool = False, metrics_file: str | None = None,
+                       screen_mode: str = "block", screen_llm: str = "best-effort",
+                       candidates_path: str | None = None,
+                       decisions_path: str | None = None,
+                       findings_path: str | None = None):
     llm = get_llm(backend, role="client")
     mapping_version = MappingStore(mapping_path).data.get("mapping_version", 1)
 
@@ -156,6 +177,40 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
             return {"rejected": f"spec: {rej}"}
         return {"ghost_task": gs.ghost_task,
                 "substitutions": [s.to_dict() for s in gs.substitutions]}
+
+    def screen_node(state: TaskState) -> dict:
+        """Second gate: score the *compiled* task for entities nobody configured.
+
+        ``compile_spec`` is closed-world — it substitutes what ``privacy.yaml`` and
+        the mapping store name, and its leak scan looks for those same real
+        spellings. A name that was in neither passed straight through. This node
+        scores what is about to cross (shapes + standing ``discover`` proposals +
+        the client-side LLM adjudicator) and, in ``block`` mode, stops the run
+        before ``handoff`` — the only node that writes to the ghost side.
+        """
+        adjudicator, llm_info = build_adjudicator(backend, mode=screen_llm)
+        res = screen_text(
+            state["ghost_task"], real_text=state["real_task"],
+            config_path=config_path, mapping_path=mapping_path,
+            candidates_path=candidates_path, decisions_path=decisions_path,
+            audit_path=audit_path, operation_id=audit.operation_id,
+            adjudicator=adjudicator, mode=screen_mode, source="ghost_task")
+        if adjudicator is None:
+            res.llm = llm_info
+        else:
+            # cost only — never the status: `screen_text` already recorded
+            # "error" if the call blew up, and `info()` cannot know that.
+            res.llm.update({k: v for k, v in adjudicator.info().items()
+                            if k != "status"})
+        if findings_path and res.findings:
+            write_findings(res, findings_path)
+
+        m = _merge_metrics(state, **res.metrics())
+        m["llm_tokens"] = m.get("llm_tokens", 0) + int(res.llm.get("tokens", 0) or 0)
+        out = {"screen_findings": [c.to_dict() for c in res.flagged], "metrics": m}
+        if res.blocked:
+            out["rejected"] = f"screen: {res.reason}"
+        return out
 
     def handoff(state: TaskState) -> dict:
         branch = f"ghostc/task/{state['task_id']}"
@@ -320,7 +375,8 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
                    path=metrics_file)
         return {"metrics": m}
 
-    nodes = [("plan", plan), ("compile_spec", compile_spec_node), ("handoff", handoff)]
+    nodes = [("plan", plan), ("compile_spec", compile_spec_node),
+             ("screen", screen_node), ("handoff", handoff)]
     if reduced:
         nodes += [("await_consultancy", await_consultancy)]
     else:
@@ -338,9 +394,11 @@ def build_client_graph(*, forge: LocalBareForge | None, audit: AuditLog, config_
 
 def graph_mermaid(*, reduced: bool = False) -> str:
     """Render the fixed graph topology as a mermaid diagram (no deps needed)."""
-    reduced_nodes = ["plan", "compile_spec", "handoff", "await_consultancy", "emit_metrics"]
-    full_nodes = ["plan", "compile_spec", "handoff", "await_ghost_pr", "reverse_patch",
-                  "verify", "consistency", "open_real_pr", "emit_metrics"]
+    reduced_nodes = ["plan", "compile_spec", "screen", "handoff", "await_consultancy",
+                     "emit_metrics"]
+    full_nodes = ["plan", "compile_spec", "screen", "handoff", "await_ghost_pr",
+                  "reverse_patch", "verify", "consistency", "open_real_pr",
+                  "emit_metrics"]
     g = StateGraph(TaskState)
     for name in (reduced_nodes if reduced else full_nodes):
         g.add_node(name, lambda s: {})
@@ -375,7 +433,11 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
              consultancy_backend: str = "stub",
              consultancy_repo: str | None = None,
              metrics_file: str | None = None,
-             scratch_dir: str = ".ghostc/scratch") -> TaskState:
+             scratch_dir: str = ".ghostc/scratch",
+             screen_mode: str = "block", screen_llm: str = "best-effort",
+             candidates_path: str | None = None,
+             decisions_path: str | None = None,
+             findings_path: str | None = None) -> TaskState:
     """Run one task through the client workflow. Returns the final state.
 
     ``stop_after="develop"`` runs the reduced, hook-triggered flow **on the real
@@ -394,6 +456,12 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
 
     ``stop_after=None`` runs the full pipeline (ghost PR → reverse-patch → verify →
     consistency → real-repo PR) which still uses ``bridge.forge.LocalBareForge``.
+
+    ``screen_mode`` / ``screen_llm`` drive the second gate (:mod:`ghostc.screen`):
+    ``block`` (default — any finding at or above ``detection.review_threshold``
+    stops the run before ``handoff``), ``warn``, ``off``; and ``best-effort``
+    (default — the LLM adjudicator runs when a client key is present, otherwise the
+    deterministic layer gates alone), ``required``, ``off``.
     """
     reduced = stop_after == "develop"
     if stop_after not in (None, "develop"):
@@ -427,7 +495,10 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
             forge=None, audit=audit, config_path=config_path, mapping_path=mapping_path,
             audit_path=audit_path, real_repo=real_repo, ghost_tree=str(ghost_repo),
             consultancy_repo=str(cons_repo), scratch=scratch, backend=backend,
-            consultancy_fn=consultancy_fn, reduced=True, metrics_file=mf_abs)
+            consultancy_fn=consultancy_fn, reduced=True, metrics_file=mf_abs,
+            screen_mode=screen_mode, screen_llm=screen_llm,
+            candidates_path=candidates_path, decisions_path=decisions_path,
+            findings_path=findings_path)
         return graph.invoke(new_state(task_id, real_task))
 
     # --- full pipeline: synthesized forge over throwaway bare repos ---------
@@ -446,5 +517,8 @@ def run_task(real_task: str, *, task_id: str, real_repo: str, ghost_tree: str,
         forge=forge, audit=audit, config_path=config_path, mapping_path=mapping_path,
         audit_path=audit_path, real_repo=real_repo, ghost_tree=ghost_tree,
         consultancy_repo="", scratch=scratch, backend=backend,
-        consultancy_fn=consultancy_fn, reduced=False, metrics_file=mf_abs)
+        consultancy_fn=consultancy_fn, reduced=False, metrics_file=mf_abs,
+        screen_mode=screen_mode, screen_llm=screen_llm,
+        candidates_path=candidates_path, decisions_path=decisions_path,
+        findings_path=findings_path)
     return graph.invoke(new_state(task_id, real_task))

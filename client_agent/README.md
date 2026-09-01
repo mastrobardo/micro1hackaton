@@ -11,13 +11,25 @@ Entrypoints (`client_agent/cli.py`, same Click group under two console names):
   for stdin), derives the task id from a `task-id:` marker (else the filename stem — keep it
   boundary-neutral, it becomes the branch name). First run creates a bare origin
   `../ghostc-demo/ghost.git` beside the ghost repo + a `post-receive` hook + the
-  consultancy's own clone `../ghostc-demo/ghost-consultancy`. Then: `plan → compile_spec →
+  consultancy's own clone `../ghostc-demo/ghost-consultancy`. Then: `plan → compile_spec → screen →
   handoff` (in `../ghostc-demo/ghost`: branch `ghostc/task/<id>`, commit the sanitized
   `TASK.md` as `ghostc-client`, `git push -f origin` → fires the hook) → the hook runs
   `consultancy-agent start` against the consultancy clone, which commits as `Consultancy Dev`
   and pushes → `await_consultancy` fetches the branch back → `emit_metrics`. **No PR.**
   Inspect: `git -C ../ghostc-demo/ghost log --stat ghostc/task/<id>` (two actors). `--full`
   runs the whole pipeline below instead (still `LocalBareForge`).
+- **The `screen` gate** — between `compile_spec` and `handoff` in **both** shapes, so it runs
+  before the only node that writes ghost-side. `compile_spec` is closed-world (it substitutes
+  what `privacy.yaml` + the mapping name, and leak-scans for those same spellings);
+  `ghostc.screen.screen_text` scores its *output* for the entities nobody configured —
+  structural shapes, standing `discover` proposals, and the LLM adjudicator in
+  `client_agent/screen_llm.py`, which is shown the real task and the ghost task and asked
+  which spellings still refer to something real. The model may **accuse, never decide**: each
+  claim is re-anchored in the outbound text (unanchored ones dropped and counted) and capped
+  at 0.60, below `auto_threshold`. Flags: `--screen-mode block|warn|off` (default `block`,
+  gates at `detection.review_threshold`), `--screen-llm best-effort|required|off` (default
+  degrades to deterministic-only with no client key, recording `screen_llm: skipped`),
+  `--candidates`, `--decisions`, `--findings`.
 - **`client-agent open-real-pr <spec>`** — the **separate** reverse-compile "webhook"
   (`client_agent/reverse_pr.py`), run *after* `start`. Simulates a forge webhook firing into
   the company boundary: `git diff <handoff>..origin/ghostc/task/<id>` (the consultancy's impl,

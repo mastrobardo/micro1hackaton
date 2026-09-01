@@ -1,7 +1,8 @@
 """ghostc command-line interface.
 
-Implemented:  validate-config, discover, compile, compile-spec, verify, baseline,
-              apply-patch, eval   (the LangGraph agent workflow is `ghostc-agent`)
+Implemented:  validate-config, discover, compile, compile-spec, screen, verify,
+              baseline, apply-patch, eval
+              (the LangGraph agent workflow is `ghostc-agent`)
 """
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ import click
 
 from ghostc import __version__
 from ghostc.config import ConfigError, entities_needing_approval, load_config
+from ghostc.screen import MODES as _SCREEN_MODES
 
 
 @click.group()
@@ -183,6 +185,82 @@ def compile_spec(task_path: str, config_path: str, mapping_path: str, out_path: 
     else:
         click.echo(spec.summary())
         click.echo(f"  -> {out_path}")
+
+
+@main.command()
+@click.option("--text", "text_path", required=True, type=click.Path(),
+              help="The outbound text to screen (a compiled ghost TASK.md), or '-'.")
+@click.option("--real", "real_path", default=None, type=click.Path(),
+              help="The boundary-internal original, for an adjudicator to diff against. "
+                   "Never scanned or written here; `ghostc` itself has no adjudicator.")
+@click.option("--config", "config_path", default="privacy.yaml", show_default=True,
+              type=click.Path())
+@click.option("--mapping", "mapping_path", default="workspace/private/mapping.json",
+              show_default=True, type=click.Path(),
+              help="Ghost aliases the compiler minted — they must not be flagged.")
+@click.option("--candidates", "candidates_path",
+              default="workspace/private/candidates.jsonl", show_default=True,
+              type=click.Path(),
+              help="`ghostc discover` output: names the scorer proposed and nobody froze.")
+@click.option("--decisions", "decisions_path", default=None, type=click.Path(),
+              help="Human review log (decisions.jsonl): an `ignore` suppresses a finding.")
+@click.option("--audit", "audit_path", default="workspace/private/audit.jsonl",
+              show_default=True, type=click.Path())
+@click.option("--out", "out_path", default=None, type=click.Path(),
+              help="Append the findings to this boundary-internal JSONL.")
+@click.option("--mode", type=click.Choice(list(_SCREEN_MODES)), default="block",
+              show_default=True,
+              help="block: exit 1 on any finding. warn: report only. off: skip.")
+@click.option("--threshold", type=float, default=None,
+              help="Override detection.review_threshold for this run.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the findings as JSON.")
+def screen(text_path: str, real_path: str | None, config_path: str, mapping_path: str,
+           candidates_path: str, decisions_path: str | None, audit_path: str,
+           out_path: str | None, mode: str, threshold: float | None,
+           as_json: bool) -> None:
+    """Screen outbound text for entities `privacy.yaml` never named. Fail closed.
+
+    `compile` / `compile-spec` are closed-world: they substitute what the config and
+    the mapping store know. This is the second gate — it scores what is about to
+    cross for the sensitive material they never heard of.
+    """
+    from dataclasses import replace
+
+    from ghostc.detect.settings import detection_settings
+    from ghostc.screen import screen_text, write_findings
+
+    try:
+        cfg = load_config(config_path)
+    except ConfigError as exc:
+        raise SystemExit(f"INVALID CONFIG\n{exc}")
+
+    text = (click.get_text_stream("stdin").read() if text_path == "-"
+            else Path(text_path).read_text(encoding="utf-8"))
+    real_text = Path(real_path).read_text(encoding="utf-8") if real_path else None
+
+    settings = detection_settings(cfg)
+    if threshold is not None:
+        settings = replace(settings, review_threshold=threshold)
+
+    result = screen_text(text, real_text=real_text, cfg=cfg, mapping_path=mapping_path,
+                         candidates_path=candidates_path, decisions_path=decisions_path,
+                         audit_path=audit_path, settings=settings, mode=mode,
+                         source=("stdin" if text_path == "-" else text_path))
+    if out_path and result.findings:
+        write_findings(result, out_path)
+
+    if as_json:
+        import json
+
+        click.echo(json.dumps({"operation_id": result.operation_id,
+                               "blocked": result.blocked,
+                               "metrics": result.metrics(),
+                               "findings": [c.to_dict() for c in result.findings]},
+                              indent=2))
+    else:
+        click.echo(result.summary())
+    if result.blocked:
+        raise SystemExit(1)
 
 
 # `ghostc run-task` (the LangGraph agent workflow) now lives in `client_agent.cli`

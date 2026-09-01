@@ -17,6 +17,26 @@ Scope: the hackathon slice. Production hardening is roadmap Phase 11 (`TODO.md`)
 - Any credential, token, private key, connection string
 - Real task text (Jira), real client names, real commercial-relationship details
 
+## Which LLM sees what
+
+Two model **roles**, and they are not equally trusted (`bridge/llm.py::resolve_secret`
+gives each its own key so they can be billed and revoked separately):
+
+| role | runs | prompt may contain | why |
+|---|---|---|---|
+| `client` | inside the boundary: the PR-consistency verdict, the `screen` adjudicator | **real** values — the real task text, the real diff | It is the company's own model call, on the company's own key, about the company's own data. It never talks to the consultancy. |
+| `consultancy` | outside: the external coding agent | ghost values only | It is the adversary in the row below. |
+
+So the `screen` adjudicator (`client_agent/screen_llm.py`) is given the real task
+*and* the ghost task and asked to diff them. That is a deliberate widening of a
+crossing the consistency gate already makes, not a new one: it buys the recall that
+catches a partner name in prose, where the deterministic detector has no anchor to
+work from. It costs one API call per task, on the client key.
+
+If that trade is wrong for a deployment, `--screen-llm off` removes the layer and the
+deterministic screen still gates; a self-hosted client model removes the crossing
+without removing the layer.
+
 ## Adversaries considered
 
 | Adversary | Assumed capability | Mitigation in this slice |
@@ -50,8 +70,12 @@ Assign the level by the first matching rule:
 - **One-shot only.** No incremental sync; each run recompiles. Mapping stability across runs is
   provided by the mapping store, but divergence handling is not implemented (Phase 4).
 - **Entity discovery is not exhaustive.** Recall depends on `privacy.yaml` + the discovery
-  agent. The Verification agent is the backstop; unknown-unknowns can still slip if they don't
-  match any known real value or secret pattern.
+  agent. `ghostc screen` is the second backstop on the outbound wire (structural shapes +
+  standing `discover` proposals + an LLM adjudicator, `screen.scanned` / `screen.blocked`),
+  and it is what catches an entity nobody ever configured. It is still not a proof:
+  a sensitive name with no shape, no standing proposal, and nothing about it that reads
+  as a proper noun can pass all three layers. The gate raises the floor; it does not
+  close the class.
 - **Sandbox is assumed, not built.** Network isolation for the external agent is a property of
   how the run is executed, not enforced by this codebase in the slice.
 - **Reverse compilation of agent-invented tokens.** New identifiers the agent creates that

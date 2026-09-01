@@ -111,6 +111,26 @@ ghostc compile --repo workspace/real --config privacy.yaml
 ghostc verify --ghost workspace/ghost --mapping workspace/private/mapping.json
 #  Expected: PASS (exit 0). Any real value in the ghost -> BLOCK (exit 1).
 
+# 5c-bis. screen — gate the OUTBOUND text for entities privacy.yaml never named
+ghostc compile-spec --task specs/001-add-companyx-integration.md \
+  --config fixtures/webapp/privacy.webapp.yaml \
+  --mapping .ghostc/webapp-private/mapping.json --out /tmp/ghost-task.md
+ghostc screen --text /tmp/ghost-task.md --config fixtures/webapp/privacy.webapp.yaml \
+  --mapping .ghostc/webapp-private/mapping.json \
+  --candidates .ghostc/webapp-private/candidates.jsonl
+#  Expected: CLEAN, exit 0.
+#  Now the spec that exists to be blocked (an unconfigured partner in the ticket):
+ghostc compile-spec --task specs/002-onboard-halcyon-cargo.md \
+  --config fixtures/webapp/privacy.webapp.yaml \
+  --mapping .ghostc/webapp-private/mapping.json --out /tmp/h.md
+ghostc screen --text /tmp/h.md --config fixtures/webapp/privacy.webapp.yaml \
+  --mapping .ghostc/webapp-private/mapping.json \
+  --candidates .ghostc/webapp-private/candidates.jsonl
+#  Expected: BLOCK, exit 1 — 4 findings (a secret, an internal host, a contract id,
+#  an email) that `compile-spec` could not touch because they are in no config.
+#  Inside the agent workflow the same call also runs an LLM adjudicator, which adds
+#  `Halcyon Freight` itself — prose, no structural anchor for the detector to grab.
+
 # 5d. eval — count residual real-entity occurrences in baseline vs compile
 ghostc eval --real workspace/real --config privacy.yaml
 #  -> workspace/eval-report.{md,csv} + workspace/eval-report-cases.csv
@@ -257,6 +277,43 @@ CONSULTANCY_BACKEND=claude scripts/ci/run-local.sh
 
 ---
 
+## 7-bis. The outbound screen — and how a reviewer clears a false positive
+
+```bash
+client-agent start 002-onboard-halcyon-cargo --consultancy-backend stub
+# REJECTED (fail closed): screen: 5 unscreened finding(s) in the outbound ghost_task;
+#   strongest: llm + structural shape @ 0.81
+```
+
+Nothing was pushed: `screen` sits between `compile_spec` and `handoff`, and `handoff` is
+the only node that writes ghost-side. The audit log records `screen.scanned` +
+`screen.blocked` with the surfaces **hashed** — the record of a privacy failure is not
+itself a privacy failure.
+
+Two ways forward, both of them the operator's call, not the model's:
+
+```bash
+# (a) the finding is real -> configure the entity, and the compiler handles it from now on
+#     (add Halcyon Freight to fixtures/webapp/privacy.webapp.yaml, then re-run)
+
+# (b) the finding is noise -> dismiss it once, permanently
+ghostc-review -- --candidates workspace/private/screen-findings.jsonl \
+                 --decisions review/decisions.jsonl --config privacy.yaml
+client-agent start 002-onboard-halcyon-cargo --decisions review/decisions.jsonl
+```
+
+`--findings <path>` on `start` / `run-task` writes the findings in the same `Candidate`
+shape the review board already reads, so (b) needs no new tooling. An `ignore` suppresses
+that surface for good; an `accept` deliberately keeps blocking, because an accepted entity
+belongs in `privacy.yaml` and until it is there the compiler still cannot substitute it.
+
+`--screen-llm off` drops to the deterministic layer (still blocks, on 4 of the 5);
+`--screen-mode warn` records without gating. With no client API key the adjudicator is
+skipped automatically and the run records `screen_llm: skipped` — the gate degrades
+loudly, never silently.
+
+---
+
 ## 8. Human review board (`ghostc-review`)
 
 The compiler's `restricted`-entity gate and `discover`'s proposals are approved by
@@ -305,7 +362,8 @@ ghostc-review -- --candidates workspace/private/candidates.jsonl \
 |---|---|---|
 | `pip install -e ".[dev]"` | ~30 s | free |
 | `pytest -q` | ~45 s | free |
-| `ghostc baseline` / `compile` / `verify` / `discover` / `eval` | seconds each | free |
+| `ghostc baseline` / `compile` / `verify` / `discover` / `screen` / `eval` | seconds each | free |
+| the `screen` node's LLM adjudicator (inside `client-agent start`) | ~5 s | ≈ **$0.05** per task (one client-role call, ~4k tokens) |
 | `./scripts/e2e.sh` (with eval) | ~1–2 min | free |
 | `ghostc-agent run-task --backend stub` | ~5 s | free |
 | `client-agent start --consultancy-backend claude` | ~3 min | ≈ **$0.50–2** (Claude Opus, ~1 real agent run; approximate — varies with the model's step count) |

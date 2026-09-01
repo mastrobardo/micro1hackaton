@@ -49,6 +49,7 @@ It never receives the real repo, the mapping, or any credential.
 | **Privacy Compiler** | deterministic | real repo, `privacy.yaml`, mapping store | `workspace/ghost/` (fresh `git init`) + sibling `workspace/ghost-spec.md`, updated mapping, audit events | Node-scoped replacement only (identifier / string / comment nodes via tree-sitter). **Package import specifiers are kept verbatim** (a renamed dependency would not resolve in the ghost); first-party (`./`) specifiers still rewrite; `rewrite_imports: true` per entity overrides. Deterministic output. Never copies `.git`. Refuses to run if spec/mapping/audit paths resolve inside `--out`; re-scans the ghost tree for stray metadata before the baseline commit. |
 | **Mapping store** | data | — | `workspace/private/mapping.json` | Boundary-internal. Holds real->ghost in cleartext (needed for reverse compile). Once an entry is `frozen`, its `ghost` value never changes. Versioned by `mapping_version`. |
 | **Verification agent** | deterministic (`ghostc verify`) | `workspace/ghost/`, mapping store, `privacy.yaml` | `PASS` / `BLOCK` + reasons, exit 0/1, `verify.*` audit events | Fail closed. `BLOCK` on any real value found in the ghost (`\b`-anchored scan of mapping `real` values + seed spellings), any mapping-shaped file under the ghost, or `yarn lint` failure. Build gate is `skipped` without the toolchain unless `--require-build`. |
+| **Outbound screen** (`ghostc screen`, graph node `screen`) | deterministic scoring + an *injected* LLM adjudicator | the text about to cross (the compiled ghost task), the boundary-internal original, `candidates.jsonl`, `decisions.jsonl` | scored findings + `screen.scanned` / `screen.blocked` audit events; blocks the run | The **open-world** half of the compiler. `compile` / `compile-spec` substitute only what `privacy.yaml` + the mapping name and leak-scan for those same spellings — an entity nobody configured is invisible to both. This scores their *output*, so every finding is something the closed world missed. It never transforms anything: no screen signal is a *hard* signal, so a finding is only ever `review` or `ignore`. The LLM layer may **accuse** only — each claim is anchored back into the outbound text and capped below `auto_threshold`. Fail closed by default (`--screen-mode block`). |
 | **External coding agent** | off-the-shelf | ghost repo + ghost spec | ghost PR (branch + diff) | Treated as untrusted. No network to company services. |
 | **Reverse Patch Compiler** | deterministic | ghost diff, mapping store | real diff applied to a branch on the real repo | Rejects: unmapped ghost-alias-shaped tokens, unexpected real entities, mapping-version mismatch, ambiguous resolution. |
 | **PR-consistency agent** | LLM | real diff, task text | consistency verdict + flags | Output feeds a human review gate; does not merge. |
@@ -113,9 +114,17 @@ The trust boundary is also a **module-import rule**:
 
 The client↔consultancy handoff is a git push to a ghost remote (`bridge.forge`), not a
 function call — so the two agents run as genuinely separate processes/containers with the
-privacy boundary on the wire. `ghostc-mcp` exposes `compile_spec` / `discover` / `verify` /
+privacy boundary on the wire. `ghostc-mcp` exposes `compile_spec` / `screen` / `discover` / `verify` /
 `apply_patch` as MCP tools for LLM-driven use; the graph's fixed nodes call `ghostc.*`
 in-process. Diagram: `client_agent/graph.md`.
+
+**Two gates in front of the wire.** `compile_spec` (closed-world substitution, fail-closed
+on a residual known spelling) then `screen` (open-world scoring of the compiled output,
+fail-closed on an unknown one) both run before `handoff` — the only node that writes
+ghost-side. The screen's deterministic layer lives in `ghostc/screen.py` and stays
+stdlib-shaped; its LLM adjudicator lives in `client_agent/screen_llm.py`, because
+`ghostc/` may not import `bridge` (`tests/test_boundary.py`). That split is the design:
+the model is a *recall* input to a deterministic decision, never the decision.
 
 ## Where a production integration differs
 

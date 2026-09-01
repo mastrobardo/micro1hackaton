@@ -52,9 +52,12 @@ ci_stage_and_compile() {
 # -> consultancy develops -> reverse-compile the impl onto a real-repo branch.
 ci_run_flow() {
   say "client-agent start  (consultancy backend: $CONSULTANCY_BACKEND)"
+  # --candidates turns on the screen's anchor layer: an entity a previous `discover`
+  # proposed and nobody froze into the config gates the run here too.
   client-agent start "$SPEC" --consultancy-backend "$CONSULTANCY_BACKEND" \
     --config "$CONFIG" --ghost-tree "$GHOST_TREE" --real-repo "$REAL_TREE" \
-    --mapping "$PRIV/mapping.json" --audit "$PRIV/audit.jsonl" --metrics-file "$METRICS"
+    --mapping "$PRIV/mapping.json" --audit "$PRIV/audit.jsonl" --metrics-file "$METRICS" \
+    --candidates "$PRIV/candidates.jsonl" --findings "$PRIV/screen-findings.jsonl"
   say "client-agent open-real-pr  (the 'webhook' — reverse compile)"
   client-agent open-real-pr "$SPEC" \
     --config "$CONFIG" --ghost-tree "$GHOST_TREE" --real-repo "$REAL_TREE" \
